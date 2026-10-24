@@ -1,0 +1,78 @@
+================================================================================
+                    PHARMACORE ERP + POS - SYSTEM INSTALLATION PACKAGE
+                   Cloud-Connected Multi-Tenant Pharmacy Management System
+================================================================================
+
+This folder contains everything you need to share, transfer, and install PharmaCore on any 
+Windows PC or laptop (Windows 10, 11, or Windows Server 64-bit).
+
+--------------------------------------------------------------------------------
+1. FILES IN THIS FOLDER
+--------------------------------------------------------------------------------
+• "PharmaCore POS Setup 1.0.0.exe"
+  -> The Standard Windows Installer.
+  -> Double-click to install onto the computer with desktop and start menu shortcuts.
+
+• "PharmaCore POS Portable 1.0.0.exe"
+  -> The Standalone / Portable Edition.
+  -> Runs immediately without needing Windows installation or administrator privileges.
+  -> Perfect for running directly from a USB Flash Drive or shared network drive.
+
+• "database_master.sql"
+  -> The complete PostgreSQL & Supabase schema with all 19 tables, Row Level Security,
+     triggers, RPC stored procedures, 5 pre-configured pharmacies, and 47 SESSI Price
+     List medicines.
+
+--------------------------------------------------------------------------------
+2. HOW TO INSTALL ON ANOTHER SYSTEM
+--------------------------------------------------------------------------------
+Option A: Using the Installer (Recommended)
+1. Copy this entire folder or "PharmaCore POS Setup 1.0.0.exe" to the new computer.
+2. Double-click "PharmaCore POS Setup 1.0.0.exe".
+3. The app will install automatically in 5 seconds and launch with a desktop shortcut.
+
+Option B: Using the Portable App (No installation needed)
+1. Copy "PharmaCore POS Portable 1.0.0.exe" to any folder (e.g. Desktop or D:\).
+2. Double-click the file to open PharmaCore instantly.
+
+--------------------------------------------------------------------------------
+3. INITIAL ADMINISTRATOR SETUP & ACCESS CONTROL
+--------------------------------------------------------------------------------
+For security, all hardcoded default passwords have been completely removed from
+the system.
+
+• First-Run Setup:
+  When opening PharmaCore for the first time on a new system, the Onboarding
+  Wizard will guide you through creating your organization profile and your
+  personal administrator credentials (minimum 8 characters).
+
+• Forced Password Change on First Login:
+  Any staff or administrative user provisioned by a SuperAdmin is flagged with
+  must_change_password = TRUE. Upon their initial login, they will be
+  immediately prompted to set a new private password before accessing the system.
+
+• Platform Roles:
+  A. SaaS Platform SuperAdministrator (Global SaaS Control Center):
+     Username: superadmin
+  B. Chief Pharmacist Administrator:
+     Username: admin
+  C. Counter Dispenser / Cashier:
+     Username: pharmacist
+  D. Branch Store Managers:
+     alshifa_admin, medix_admin, khyber_admin, bolan_admin
+
+--------------------------------------------------------------------------------
+4. PRINTER & BARCODE SCANNER SETUP
+--------------------------------------------------------------------------------
+• Thermal Receipt Printers (80mm & 58mm POS Printers):
+  - Connect your thermal receipt printer via USB.
+  - Set it as the default printer or select it when clicking "Print Receipt".
+  - Receipts automatically format to 80mm thermal paper with high contrast.
+
+• Barcode Scanners:
+  - Plug-and-play USB or Bluetooth barcode scanners work automatically.
+  - The POS screen is pre-configured to auto-focus the scanner input.
+
+================================================================================
+PharmaCore ERP + POS · The Unified Pharmacy Ecosystem
+================================================================================

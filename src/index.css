@@ -1,0 +1,135 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Pharmacore Color System */
+  --color-bg-app: #F0F7F4;         /* Soft clinical mint/gray background */
+  --color-surface: #FFFFFF;        /* Pure white for cards/panels */
+  --color-primary: #087B62;        /* Trustworthy medical green */
+  --color-primary-hover: #065c49;  /* Deep green for interactions */
+  --color-accent: #14B8A6;         /* Bright teal for badges/highlights */
+  --color-border: #E2E8F0;         /* Crisp, subtle borders */
+  --color-glow: rgba(8, 123, 98, 0.25); /* Focus ring glow */
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-bg-app);
+  color: #1E293B; /* Slate 800 for high readability text */
+}
+
+/* Subtle paper grain texture overlay */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.015; /* Softened slightly for a cleaner look */
+  z-index: 9999;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%' height='100%' filter='url(%23noise)'/%3E%3C/svg%3E");
+}
+
+@layer base {
+  body {
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    /* Optional: A tiny bit of tracking makes Space Grotesk look very premium */
+    letter-spacing: -0.015em;
+    font-weight: bold;
+  }
+
+  /* Make sure inputs and buttons inherit the bold styling nicely */
+  input, button, select, textarea {
+    font-family: inherit;
+  }
+}
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 300ms ease-out forwards;
+  }
+  .animate-slide-up {
+    animation: slideUp 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .animate-slide-down {
+    animation: slideDown 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes slideDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+@layer components {
+  button {
+    @apply transition-all duration-200 ease-out;
+  }
+
+  button:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 6px -1px rgba(8, 123, 98, 0.1), 0 2px 4px -1px rgba(8, 123, 98, 0.06);
+  }
+
+  button:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: none;
+  }
+
+  /* Structural UI panels */
+  .bg-white {
+    @apply shadow-sm;
+    border: 1px solid var(--color-border);
+  }
+
+  /* Form Elements */
+  input[type="text"],
+  input[type="number"],
+  input[type="password"],
+  input[type="email"],
+  select,
+  textarea {
+    @apply transition-all duration-200 border outline-none rounded-md px-3 py-2;
+    border-color: var(--color-border);
+    background-color: #F8FAFC;
+  }
+
+  input:focus,
+  select:focus,
+  textarea:focus {
+    background-color: var(--color-surface);
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-glow);
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #A7F3D0; /* Lighter emerald for idle state */
+  border-radius: 9999px;
+  border: 2px solid var(--color-bg-app); /* Creates a padded look */
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary);
+}

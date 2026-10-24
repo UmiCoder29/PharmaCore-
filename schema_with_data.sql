@@ -1,0 +1,1245 @@
+-- ==============================================================================
+-- PharmaCore ERP + POS — Master Multi-Tenant SaaS Database Schema
+-- Compatible with Supabase & PostgreSQL (with Supabase Auth)
+-- ==============================================================================
+-- This script sets up the full B2B SaaS database schema:
+--  1. Extensions
+--  2. Core SaaS & Operational Tables
+--     (pharmacies [tenants], branches, app_users, categories, suppliers,
+--      medicines, batches, customers, prescriptions, sales, sale_items,
+--      sale_payments, returns, return_items, activity_logs, settings)
+--  3. Indexes & Constraints
+--  4. Security Helper Functions (Multi-Tenant & Role Aware)
+--  5. Row-Level Security (RLS) Policies (Strict Tenant Isolation)
+--  6. Stored Procedures & Business Logic RPCs
+--  7. Default Data Seeding & Permissions
+-- ==============================================================================
+
+-- ------------------------------------------------------------------------------
+-- 1. EXTENSIONS
+-- ------------------------------------------------------------------------------
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ------------------------------------------------------------------------------
+-- 2. TABLES CREATION
+-- ------------------------------------------------------------------------------
+
+-- 2.0 Pharmacies (SaaS Tenants / Organizations)
+CREATE TABLE IF NOT EXISTS public.pharmacies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    contact_email TEXT,
+    contact_phone TEXT,
+    address TEXT,
+    city TEXT,
+    tax_number TEXT,
+    logo_url TEXT,
+    plan_tier TEXT NOT NULL DEFAULT 'trial' CHECK (plan_tier IN ('trial', 'starter', 'professional', 'enterprise')),
+    subscription_status TEXT NOT NULL DEFAULT 'trial' CHECK (subscription_status IN ('trial', 'active', 'past_due', 'suspended', 'cancelled')),
+    trial_ends_at TIMESTAMPTZ DEFAULT (now() + INTERVAL '14 days'),
+    subscription_ends_at TIMESTAMPTZ DEFAULT (now() + INTERVAL '14 days'),
+    max_branches INTEGER NOT NULL DEFAULT 1 CHECK (max_branches > 0),
+    max_users INTEGER NOT NULL DEFAULT 3 CHECK (max_users > 0),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.1 Branches (Locations per Pharmacy)
+CREATE TABLE IF NOT EXISTS public.branches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    address TEXT,
+    phone TEXT,
+    is_main_branch BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.2 App Users (linked to Supabase auth.users)
+CREATE TABLE IF NOT EXISTS public.app_users (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    pharmacy_id UUID REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    username TEXT UNIQUE NOT NULL,
+    display_name TEXT,
+    role TEXT NOT NULL CHECK (role IN ('superadmin', 'admin', 'pharmacist')),
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    can_view_all_branches BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT app_users_pharmacy_check CHECK (
+        role = 'superadmin' OR pharmacy_id IS NOT NULL
+    )
+);
+
+-- 2.3 Categories
+CREATE TABLE IF NOT EXISTS public.categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    tax_rate NUMERIC DEFAULT 0,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.4 Suppliers
+CREATE TABLE IF NOT EXISTS public.suppliers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    contact_phone TEXT,
+    contact_email TEXT,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.5 Medicines
+CREATE TABLE IF NOT EXISTS public.medicines (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    generic_name TEXT,
+    barcode TEXT,
+    category_id UUID REFERENCES public.categories(id) ON DELETE SET NULL,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    unit_name TEXT DEFAULT 'Tablet',
+    packaging_name TEXT,
+    units_per_packaging INTEGER DEFAULT 1,
+    packaging_per_box INTEGER,
+    prescription_required BOOLEAN NOT NULL DEFAULT FALSE,
+    controlled_schedule TEXT,
+    reorder_level INTEGER NOT NULL DEFAULT 10 CHECK (reorder_level >= 0),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.6 Batches (Inventory Stock)
+CREATE TABLE IF NOT EXISTS public.batches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    medicine_id UUID NOT NULL REFERENCES public.medicines(id) ON DELETE CASCADE,
+    batch_number TEXT NOT NULL,
+    expiry_date DATE,
+    supplier_id UUID REFERENCES public.suppliers(id) ON DELETE SET NULL,
+    quantity_in_stock INTEGER DEFAULT 0,
+    original_quantity INTEGER DEFAULT 0,
+    cost_per_unit NUMERIC DEFAULT 0,
+    selling_price NUMERIC DEFAULT 0,
+    date_added TIMESTAMPTZ DEFAULT now(),
+    date_purchased DATE,
+    is_expired BOOLEAN DEFAULT FALSE,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.7 Customers / Patients
+CREATE TABLE IF NOT EXISTS public.customers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    full_name TEXT NOT NULL,
+    phone TEXT,
+    cnic TEXT,
+    address TEXT,
+    date_of_birth DATE,
+    allergies TEXT,
+    notes TEXT,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 2.8 Prescriptions
+CREATE TABLE IF NOT EXISTS public.prescriptions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    customer_id UUID NOT NULL REFERENCES public.customers(id) ON DELETE CASCADE,
+    prescriber_name TEXT NOT NULL,
+    prescriber_registration_no TEXT,
+    prescription_date DATE NOT NULL,
+    attachment_reference TEXT,
+    status TEXT NOT NULL DEFAULT 'verified' CHECK (status IN ('pending', 'verified', 'rejected', 'dispensed')),
+    verified_by_user_id UUID REFERENCES public.app_users(id) ON DELETE SET NULL,
+    verified_at TIMESTAMPTZ,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 2.9 Sales (Transactions)
+CREATE TABLE IF NOT EXISTS public.sales (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    invoice_number TEXT,
+    date_time TIMESTAMPTZ DEFAULT now(),
+    subtotal NUMERIC NOT NULL,
+    total_tax NUMERIC NOT NULL,
+    total_amount NUMERIC NOT NULL,
+    cashier_user_id UUID REFERENCES public.app_users(id) ON DELETE SET NULL,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    customer_id UUID REFERENCES public.customers(id) ON DELETE SET NULL,
+    prescription_id UUID REFERENCES public.prescriptions(id) ON DELETE SET NULL,
+    payment_method TEXT NOT NULL DEFAULT 'cash' CHECK (payment_method IN ('cash', 'card', 'jazzcash', 'easypaisa', 'bank_transfer', 'credit', 'split')),
+    discount_amount NUMERIC NOT NULL DEFAULT 0 CHECK (discount_amount >= 0),
+    cash_received NUMERIC,
+    change_amount NUMERIC NOT NULL DEFAULT 0 CHECK (change_amount >= 0),
+    notes TEXT,
+    fbr_invoice_number TEXT,
+    fbr_qr_payload TEXT,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.10 Sale Items
+CREATE TABLE IF NOT EXISTS public.sale_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    sale_id UUID NOT NULL REFERENCES public.sales(id) ON DELETE CASCADE,
+    medicine_id UUID REFERENCES public.medicines(id) ON DELETE SET NULL,
+    batch_id UUID REFERENCES public.batches(id) ON DELETE SET NULL,
+    batch_number TEXT,
+    name TEXT,
+    quantity INTEGER DEFAULT 0,
+    price_at_sale NUMERIC NOT NULL,
+    tax_rate_at_sale NUMERIC NOT NULL,
+    tax_amount NUMERIC NOT NULL,
+    subtotal_item NUMERIC NOT NULL,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL
+);
+
+-- 2.11 Sale Payments (Split / Multi-payment methods)
+CREATE TABLE IF NOT EXISTS public.sale_payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    sale_id UUID NOT NULL REFERENCES public.sales(id) ON DELETE CASCADE,
+    method TEXT NOT NULL CHECK (method IN ('cash', 'card', 'jazzcash', 'easypaisa', 'bank_transfer', 'credit')),
+    amount NUMERIC NOT NULL CHECK (amount > 0),
+    reference TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 2.12 Returns / Refunds
+CREATE TABLE IF NOT EXISTS public.returns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    sale_id UUID REFERENCES public.sales(id) ON DELETE CASCADE,
+    return_date TIMESTAMPTZ DEFAULT now(),
+    refund_method TEXT NOT NULL CHECK (refund_method IN ('Cash', 'Store Credit')),
+    total_refund_amount NUMERIC NOT NULL DEFAULT 0,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+    processed_by_user_id UUID REFERENCES public.app_users(id) ON DELETE SET NULL,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.13 Return Items
+CREATE TABLE IF NOT EXISTS public.return_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    return_id UUID NOT NULL REFERENCES public.returns(id) ON DELETE CASCADE,
+    sale_item_id UUID REFERENCES public.sale_items(id) ON DELETE SET NULL,
+    medicine_id UUID REFERENCES public.medicines(id) ON DELETE SET NULL,
+    batch_id UUID REFERENCES public.batches(id) ON DELETE SET NULL,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    reason TEXT NOT NULL,
+    condition TEXT NOT NULL CHECK (condition IN ('opened', 'unopened', 'N/A')),
+    refund_amount NUMERIC NOT NULL DEFAULT 0,
+    quarantined BOOLEAN DEFAULT FALSE,
+    restored_to_stock BOOLEAN DEFAULT FALSE,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL
+);
+
+-- 2.14 Activity Logs
+CREATE TABLE IF NOT EXISTS public.activity_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES public.app_users(id) ON DELETE SET NULL,
+    username TEXT,
+    action TEXT NOT NULL,
+    target_table TEXT,
+    target_record_id UUID,
+    details JSONB,
+    device_name TEXT,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2.15 Settings (Per Pharmacy)
+CREATE TABLE IF NOT EXISTS public.settings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pharmacy_id UUID NOT NULL REFERENCES public.pharmacies(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    value TEXT,
+    branch_id UUID REFERENCES public.branches(id) ON DELETE SET NULL,
+    CONSTRAINT settings_pharmacy_key_branch_unique UNIQUE (pharmacy_id, key, branch_id)
+);
+
+-- ------------------------------------------------------------------------------
+-- 3. INDEXES
+-- ------------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_pharmacies_slug ON public.pharmacies(slug);
+CREATE INDEX IF NOT EXISTS idx_pharmacies_status ON public.pharmacies(subscription_status);
+CREATE INDEX IF NOT EXISTS idx_branches_pharmacy ON public.branches(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_app_users_pharmacy ON public.app_users(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_medicines_pharmacy ON public.medicines(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_medicines_barcode ON public.medicines(barcode);
+CREATE INDEX IF NOT EXISTS idx_medicines_branch ON public.medicines(branch_id);
+CREATE INDEX IF NOT EXISTS idx_medicines_is_active ON public.medicines(is_active);
+CREATE INDEX IF NOT EXISTS idx_batches_pharmacy ON public.batches(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_batches_medicine ON public.batches(medicine_id);
+CREATE INDEX IF NOT EXISTS idx_batches_expiry ON public.batches(expiry_date);
+CREATE INDEX IF NOT EXISTS idx_batches_expired ON public.batches(is_expired);
+CREATE INDEX IF NOT EXISTS idx_batches_branch ON public.batches(branch_id);
+CREATE INDEX IF NOT EXISTS idx_sales_pharmacy ON public.sales(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_sales_cashier ON public.sales(cashier_user_id);
+CREATE INDEX IF NOT EXISTS idx_sales_date ON public.sales(date_time);
+CREATE INDEX IF NOT EXISTS idx_sales_branch ON public.sales(branch_id);
+CREATE INDEX IF NOT EXISTS idx_sales_customer ON public.sales(customer_id);
+CREATE INDEX IF NOT EXISTS idx_sale_items_pharmacy ON public.sale_items(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON public.sale_items(sale_id);
+CREATE INDEX IF NOT EXISTS idx_sale_payments_pharmacy ON public.sale_payments(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_sale_payments_sale ON public.sale_payments(sale_id);
+CREATE INDEX IF NOT EXISTS idx_returns_pharmacy ON public.returns(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_returns_sale ON public.returns(sale_id);
+CREATE INDEX IF NOT EXISTS idx_return_items_pharmacy ON public.return_items(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_activity_pharmacy ON public.activity_logs(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_activity_user ON public.activity_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_pharmacy ON public.prescriptions(pharmacy_id);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_customer ON public.prescriptions(customer_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS sales_pharmacy_invoice_unique ON public.sales(pharmacy_id, invoice_number) WHERE invoice_number IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS customers_pharmacy_phone_unique ON public.customers(pharmacy_id, phone) WHERE phone IS NOT NULL;
+
+-- ------------------------------------------------------------------------------
+-- 4. SECURITY & HELPER FUNCTIONS
+-- ------------------------------------------------------------------------------
+
+-- 4.1 Check if current user is SuperAdmin (Platform Owner)
+CREATE OR REPLACE FUNCTION public.is_superadmin() RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN EXISTS (SELECT 1 FROM public.app_users WHERE id = auth.uid() AND role = 'superadmin');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4.2 Check if authenticated user is admin or superadmin
+CREATE OR REPLACE FUNCTION public.is_admin() RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN EXISTS (SELECT 1 FROM public.app_users WHERE id = auth.uid() AND role IN ('admin', 'superadmin'));
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4.3 Get current user's pharmacy ID
+CREATE OR REPLACE FUNCTION public.get_user_pharmacy_id() RETURNS UUID AS $$
+DECLARE
+    v_pharmacy_id UUID;
+BEGIN
+    SELECT pharmacy_id INTO v_pharmacy_id FROM public.app_users WHERE id = auth.uid();
+    RETURN v_pharmacy_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4.4 Get the branch ID of the current authenticated user
+CREATE OR REPLACE FUNCTION public.get_user_branch_id() RETURNS UUID AS $$
+DECLARE
+    v_branch UUID;
+BEGIN
+    SELECT branch_id INTO v_branch FROM public.app_users WHERE id = auth.uid();
+    RETURN v_branch;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4.5 Check if authenticated user can view all branches for their pharmacy
+CREATE OR REPLACE FUNCTION public.can_view_all_branches() RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN EXISTS (
+        SELECT 1 FROM public.app_users 
+        WHERE id = auth.uid() AND (can_view_all_branches = true OR role = 'superadmin')
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ------------------------------------------------------------------------------
+-- 5. ROW-LEVEL SECURITY (RLS) POLICIES — STRICT MULTI-TENANT ISOLATION
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.pharmacies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.branches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.suppliers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.medicines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.batches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.customers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.prescriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sales ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sale_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sale_payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.returns ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.return_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.activity_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
+
+-- 5.0 Pharmacies Policies
+DROP POLICY IF EXISTS "pharmacies_select" ON public.pharmacies;
+CREATE POLICY "pharmacies_select" ON public.pharmacies FOR SELECT TO authenticated
+    USING (id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "pharmacies_admin_update" ON public.pharmacies;
+CREATE POLICY "pharmacies_admin_update" ON public.pharmacies FOR UPDATE TO authenticated
+    USING ((id = public.get_user_pharmacy_id() AND public.is_admin()) OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "pharmacies_superadmin_all" ON public.pharmacies;
+CREATE POLICY "pharmacies_superadmin_all" ON public.pharmacies FOR ALL TO authenticated
+    USING (public.is_superadmin());
+
+-- 5.1 Branches Policies
+DROP POLICY IF EXISTS "read_branches" ON public.branches;
+CREATE POLICY "read_branches" ON public.branches FOR SELECT TO authenticated
+    USING (
+        public.is_superadmin() OR 
+        (pharmacy_id = public.get_user_pharmacy_id() AND (id = public.get_user_branch_id() OR public.can_view_all_branches()))
+    );
+
+DROP POLICY IF EXISTS "admin_write_branches" ON public.branches;
+CREATE POLICY "admin_write_branches" ON public.branches FOR ALL TO authenticated
+    USING (
+        public.is_superadmin() OR 
+        (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin())
+    );
+
+-- 5.2 App Users Policies
+DROP POLICY IF EXISTS "read_app_users" ON public.app_users;
+CREATE POLICY "read_app_users" ON public.app_users FOR SELECT TO authenticated
+    USING (
+        public.is_superadmin() OR
+        id = auth.uid() OR
+        (pharmacy_id = public.get_user_pharmacy_id() AND (public.is_admin() OR branch_id = public.get_user_branch_id() OR public.can_view_all_branches()))
+    );
+
+DROP POLICY IF EXISTS "admin_write_app_users" ON public.app_users;
+CREATE POLICY "admin_write_app_users" ON public.app_users FOR ALL TO authenticated
+    USING (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin())
+    );
+
+-- 5.3 Categories Policies
+DROP POLICY IF EXISTS "read_categories" ON public.categories;
+CREATE POLICY "read_categories" ON public.categories FOR SELECT TO authenticated
+    USING (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "admin_write_categories" ON public.categories;
+CREATE POLICY "admin_write_categories" ON public.categories FOR ALL TO authenticated
+    USING (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()));
+
+-- 5.4 Suppliers Policies
+DROP POLICY IF EXISTS "read_suppliers" ON public.suppliers;
+CREATE POLICY "read_suppliers" ON public.suppliers FOR SELECT TO authenticated
+    USING (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "admin_write_suppliers" ON public.suppliers;
+CREATE POLICY "admin_write_suppliers" ON public.suppliers FOR ALL TO authenticated
+    USING (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()));
+
+-- 5.5 Medicines Policies
+DROP POLICY IF EXISTS "read_medicines" ON public.medicines;
+CREATE POLICY "read_medicines" ON public.medicines FOR SELECT TO authenticated
+    USING (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id() AND (branch_id = public.get_user_branch_id() OR public.can_view_all_branches() OR branch_id IS NULL))
+    );
+
+DROP POLICY IF EXISTS "admin_write_medicines" ON public.medicines;
+CREATE POLICY "admin_write_medicines" ON public.medicines FOR ALL TO authenticated
+    USING (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()));
+
+-- 5.6 Batches Policies
+DROP POLICY IF EXISTS "read_batches" ON public.batches;
+CREATE POLICY "read_batches" ON public.batches FOR SELECT TO authenticated
+    USING (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id() AND (branch_id = public.get_user_branch_id() OR public.can_view_all_branches() OR branch_id IS NULL))
+    );
+
+DROP POLICY IF EXISTS "admin_write_batches" ON public.batches;
+CREATE POLICY "admin_write_batches" ON public.batches FOR ALL TO authenticated
+    USING (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()));
+
+-- 5.7 Customers Policies
+DROP POLICY IF EXISTS "customers_access" ON public.customers;
+CREATE POLICY "customers_access" ON public.customers FOR ALL TO authenticated
+    USING (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id() AND (branch_id = public.get_user_branch_id() OR public.can_view_all_branches() OR public.is_admin()))
+    )
+    WITH CHECK (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id())
+    );
+
+-- 5.8 Prescriptions Policies
+DROP POLICY IF EXISTS "prescriptions_access" ON public.prescriptions;
+CREATE POLICY "prescriptions_access" ON public.prescriptions FOR ALL TO authenticated
+    USING (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id() AND (branch_id = public.get_user_branch_id() OR public.can_view_all_branches() OR public.is_admin()))
+    )
+    WITH CHECK (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id())
+    );
+
+-- 5.9 Sales Policies
+DROP POLICY IF EXISTS "read_sales" ON public.sales;
+CREATE POLICY "read_sales" ON public.sales FOR SELECT TO authenticated
+    USING (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id() AND (branch_id = public.get_user_branch_id() OR public.can_view_all_branches()))
+    );
+
+DROP POLICY IF EXISTS "write_sales" ON public.sales;
+CREATE POLICY "write_sales" ON public.sales FOR INSERT TO authenticated
+    WITH CHECK (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id())
+    );
+
+DROP POLICY IF EXISTS "admin_modify_sales" ON public.sales;
+CREATE POLICY "admin_modify_sales" ON public.sales FOR UPDATE TO authenticated
+    USING (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()));
+
+DROP POLICY IF EXISTS "admin_delete_sales" ON public.sales;
+CREATE POLICY "admin_delete_sales" ON public.sales FOR DELETE TO authenticated
+    USING (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()));
+
+-- 5.10 Sale Items Policies
+DROP POLICY IF EXISTS "read_sale_items" ON public.sale_items;
+CREATE POLICY "read_sale_items" ON public.sale_items FOR SELECT TO authenticated
+    USING (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "write_sale_items" ON public.sale_items;
+CREATE POLICY "write_sale_items" ON public.sale_items FOR INSERT TO authenticated
+    WITH CHECK (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+-- 5.11 Sale Payments Policies
+DROP POLICY IF EXISTS "sale_payments_access" ON public.sale_payments;
+CREATE POLICY "sale_payments_access" ON public.sale_payments FOR SELECT TO authenticated
+    USING (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "write_sale_payments" ON public.sale_payments;
+CREATE POLICY "write_sale_payments" ON public.sale_payments FOR INSERT TO authenticated
+    WITH CHECK (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+-- 5.12 Returns Policies
+DROP POLICY IF EXISTS "read_returns" ON public.returns;
+CREATE POLICY "read_returns" ON public.returns FOR SELECT TO authenticated
+    USING (
+        public.is_superadmin() OR
+        (pharmacy_id = public.get_user_pharmacy_id() AND (branch_id = public.get_user_branch_id() OR public.can_view_all_branches()))
+    );
+
+DROP POLICY IF EXISTS "write_returns" ON public.returns;
+CREATE POLICY "write_returns" ON public.returns FOR INSERT TO authenticated
+    WITH CHECK (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+-- 5.13 Return Items Policies
+DROP POLICY IF EXISTS "read_return_items" ON public.return_items;
+CREATE POLICY "read_return_items" ON public.return_items FOR SELECT TO authenticated
+    USING (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "write_return_items" ON public.return_items;
+CREATE POLICY "write_return_items" ON public.return_items FOR INSERT TO authenticated
+    WITH CHECK (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+-- 5.14 Activity Logs Policies
+DROP POLICY IF EXISTS "read_activity_logs" ON public.activity_logs;
+CREATE POLICY "read_activity_logs" ON public.activity_logs FOR SELECT TO authenticated
+    USING (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "write_activity_logs" ON public.activity_logs;
+CREATE POLICY "write_activity_logs" ON public.activity_logs FOR INSERT TO authenticated
+    WITH CHECK (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+-- 5.15 Settings Policies
+DROP POLICY IF EXISTS "read_settings" ON public.settings;
+CREATE POLICY "read_settings" ON public.settings FOR SELECT TO authenticated
+    USING (pharmacy_id = public.get_user_pharmacy_id() OR public.is_superadmin());
+
+DROP POLICY IF EXISTS "admin_write_settings" ON public.settings;
+CREATE POLICY "admin_write_settings" ON public.settings FOR ALL TO authenticated
+    USING (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()));
+
+-- ------------------------------------------------------------------------------
+-- 6. STORED PROCEDURES & BUSINESS LOGIC RPCS (SECURITY DEFINER)
+-- ------------------------------------------------------------------------------
+
+-- 6.1 Process Sale (Atomic Transaction with Pharmacy Validation, Stock Deduction & Invoice Gen)
+CREATE OR REPLACE FUNCTION public.process_sale(
+    p_sale_id UUID,
+    p_items JSONB,
+    p_subtotal NUMERIC,
+    p_total_tax NUMERIC,
+    p_total_amount NUMERIC,
+    p_metadata JSONB DEFAULT '{}'::JSONB
+) RETURNS UUID AS $$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_pharmacy_id UUID;
+    v_branch_id UUID;
+    v_item JSONB;
+    v_sale_item_id UUID;
+    v_payment JSONB;
+    v_invoice_number TEXT;
+    v_customer_id UUID;
+    v_prescription_id UUID;
+    v_needs_prescription BOOLEAN;
+    v_payment_total NUMERIC;
+    v_sub_status TEXT;
+    v_sub_ends TIMESTAMPTZ;
+BEGIN
+    IF v_user_id IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+    
+    SELECT pharmacy_id, branch_id INTO v_pharmacy_id, v_branch_id FROM public.app_users WHERE id = v_user_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'User not found in app_users'; END IF;
+
+    -- Verify Subscription Status
+    IF v_pharmacy_id IS NOT NULL THEN
+        SELECT subscription_status, subscription_ends_at INTO v_sub_status, v_sub_ends FROM public.pharmacies WHERE id = v_pharmacy_id;
+        IF v_sub_status IN ('suspended', 'cancelled') THEN
+            RAISE EXCEPTION 'Pharmacy subscription is suspended or cancelled. Please contact support.';
+        END IF;
+        IF v_sub_ends IS NOT NULL AND v_sub_ends < now() THEN
+            RAISE EXCEPTION 'Pharmacy subscription has expired. Please renew to continue transactions.';
+        END IF;
+    END IF;
+
+    -- Extract metadata if provided
+    v_customer_id := NULLIF(p_metadata->>'customer_id', '')::UUID;
+    v_prescription_id := NULLIF(p_metadata->>'prescription_id', '')::UUID;
+
+    -- Check prescription requirements
+    SELECT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(p_items) i
+        JOIN public.medicines m ON m.id = (i->>'medicine_id')::UUID
+        WHERE m.prescription_required OR m.controlled_schedule IS NOT NULL
+    ) INTO v_needs_prescription;
+
+    IF v_needs_prescription AND (v_customer_id IS NULL OR v_prescription_id IS NULL) THEN
+        RAISE EXCEPTION 'A verified prescription and customer are required for prescription or controlled medicines';
+    END IF;
+
+    IF v_prescription_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM public.prescriptions p 
+        WHERE p.id = v_prescription_id AND p.customer_id = v_customer_id AND p.status = 'verified'
+    ) THEN 
+        RAISE EXCEPTION 'Prescription is not verified for this customer'; 
+    END IF;
+
+    -- Validate split payment sum if payments array is supplied
+    SELECT COALESCE(SUM((p->>'amount')::NUMERIC), 0) INTO v_payment_total
+    FROM jsonb_array_elements(COALESCE(p_metadata->'payments', '[]'::JSONB)) p;
+
+    IF v_payment_total > 0 AND abs(v_payment_total - p_total_amount) > 0.01 THEN
+        RAISE EXCEPTION 'Payment total must equal the sale total';
+    END IF;
+
+    -- Generate invoice number
+    v_invoice_number := 'PC-' || to_char(now(), 'YYMMDD') || '-' || upper(substr(replace(p_sale_id::TEXT, '-', ''), 1, 6));
+
+    -- Insert parent sale record
+    INSERT INTO public.sales (
+        id, pharmacy_id, invoice_number, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id,
+        customer_id, prescription_id, payment_method, discount_amount, cash_received, change_amount, notes
+    ) VALUES (
+        p_sale_id, v_pharmacy_id, v_invoice_number, now(), p_subtotal, p_total_tax, p_total_amount, v_user_id, v_branch_id,
+        v_customer_id, v_prescription_id, COALESCE(p_metadata->>'payment_method', 'cash'),
+        COALESCE((p_metadata->>'discount_amount')::NUMERIC, 0), NULLIF(p_metadata->>'cash_received', '')::NUMERIC,
+        COALESCE((p_metadata->>'change_amount')::NUMERIC, 0), NULLIF(p_metadata->>'notes', '')
+    );
+
+    -- Loop through items: deduct stock & insert line items
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_items)
+    LOOP
+        UPDATE public.batches 
+        SET quantity_in_stock = quantity_in_stock - (v_item->>'quantity')::INTEGER
+        WHERE id = (v_item->>'batch_id')::UUID 
+          AND (v_pharmacy_id IS NULL OR pharmacy_id = v_pharmacy_id)
+          AND quantity_in_stock >= (v_item->>'quantity')::INTEGER;
+
+        IF NOT FOUND THEN 
+            RAISE EXCEPTION 'Insufficient stock for batch %', v_item->>'batch_number'; 
+        END IF;
+
+        v_sale_item_id := gen_random_uuid();
+        INSERT INTO public.sale_items (
+            id, pharmacy_id, sale_id, medicine_id, batch_id, batch_number, name, quantity,
+            price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id
+        ) VALUES (
+            v_sale_item_id,
+            v_pharmacy_id,
+            p_sale_id, 
+            (v_item->>'medicine_id')::UUID, 
+            (v_item->>'batch_id')::UUID, 
+            v_item->>'batch_number', 
+            v_item->>'name', 
+            (v_item->>'quantity')::INTEGER, 
+            (v_item->>'price_at_sale')::NUMERIC, 
+            (v_item->>'tax_rate_at_sale')::NUMERIC, 
+            (v_item->>'tax_amount')::NUMERIC, 
+            (v_item->>'subtotal_item')::NUMERIC, 
+            v_branch_id
+        );
+    END LOOP;
+
+    -- Insert individual payment rows if split payments were recorded
+    FOR v_payment IN SELECT * FROM jsonb_array_elements(COALESCE(p_metadata->'payments', '[]'::JSONB)) LOOP
+        INSERT INTO public.sale_payments (pharmacy_id, sale_id, method, amount, reference)
+        VALUES (v_pharmacy_id, p_sale_id, v_payment->>'method', (v_payment->>'amount')::NUMERIC, NULLIF(v_payment->>'reference', ''));
+    END LOOP;
+
+    -- Mark prescription as dispensed
+    IF v_prescription_id IS NOT NULL THEN 
+        UPDATE public.prescriptions SET status = 'dispensed', updated_at = now() WHERE id = v_prescription_id; 
+    END IF;
+
+    RETURN p_sale_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- 6.2 Process Return (Atomic Return Processing with Quarantine & Restock Logic)
+CREATE OR REPLACE FUNCTION public.process_return(
+    p_return_id UUID,
+    p_sale_id UUID,
+    p_items JSONB,
+    p_refund_method TEXT
+) RETURNS UUID AS $$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_pharmacy_id UUID;
+    v_branch_id UUID;
+    v_item JSONB;
+    v_return_item_id UUID;
+    v_sale_item RECORD;
+    v_total_refund NUMERIC := 0;
+    v_item_refund NUMERIC := 0;
+    v_quarantined BOOLEAN;
+    v_restored BOOLEAN;
+    v_threshold NUMERIC;
+    v_status TEXT := 'completed';
+BEGIN
+    IF v_user_id IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+
+    SELECT pharmacy_id, branch_id INTO v_pharmacy_id, v_branch_id FROM public.app_users WHERE id = v_user_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'User not found in app_users'; END IF;
+
+    -- Calculate total refund amount based on original sale line items
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_items)
+    LOOP
+        SELECT * INTO v_sale_item FROM public.sale_items WHERE id = (v_item->>'sale_item_id')::UUID;
+        IF NOT FOUND THEN RAISE EXCEPTION 'Sale item not found for ID %', v_item->>'sale_item_id'; END IF;
+        IF (v_item->>'quantity')::INTEGER > v_sale_item.quantity THEN RAISE EXCEPTION 'Cannot return more quantity than originally sold'; END IF;
+        
+        v_item_refund := ((v_sale_item.subtotal_item / v_sale_item.quantity) * (v_item->>'quantity')::INTEGER);
+        v_total_refund := v_total_refund + v_item_refund;
+    END LOOP;
+
+    -- Cash refunds exceeding approval threshold require admin approval
+    IF p_refund_method = 'Cash' THEN
+        SELECT value::NUMERIC INTO v_threshold FROM public.settings 
+        WHERE key = 'refund_approval_threshold' AND (v_pharmacy_id IS NULL OR pharmacy_id = v_pharmacy_id)
+        LIMIT 1;
+        IF NOT FOUND THEN v_threshold := 5000; END IF;
+        IF v_total_refund > v_threshold AND NOT public.is_admin() THEN
+            v_status := 'pending';
+        END IF;
+    END IF;
+
+    -- Insert return record
+    INSERT INTO public.returns (
+        id, pharmacy_id, sale_id, return_date, refund_method, total_refund_amount, status, processed_by_user_id, branch_id
+    ) VALUES (
+        p_return_id, v_pharmacy_id, p_sale_id, now(), p_refund_method, v_total_refund, v_status, v_user_id, v_branch_id
+    );
+
+    -- Process individual return line items
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_items)
+    LOOP
+        v_return_item_id := gen_random_uuid();
+        v_quarantined := FALSE;
+        v_restored := FALSE;
+        
+        IF v_item->>'reason' = 'Wrong item given' AND v_item->>'condition' = 'unopened' THEN v_restored := TRUE;
+        ELSIF v_item->>'reason' = 'Customer changed mind (unopened)' AND v_item->>'condition' = 'unopened' THEN v_restored := TRUE;
+        ELSIF v_item->>'reason' = 'Wrong prescription' THEN v_quarantined := TRUE;
+        ELSIF v_item->>'reason' = 'Suspected counterfeit or quality issue' THEN v_quarantined := TRUE;
+        ELSIF v_item->>'reason' = 'Other' THEN
+            IF v_item->>'condition' = 'unopened' THEN v_restored := TRUE;
+            ELSE v_quarantined := TRUE;
+            END IF;
+        ELSE
+            v_quarantined := TRUE;
+        END IF;
+
+        SELECT * INTO v_sale_item FROM public.sale_items WHERE id = (v_item->>'sale_item_id')::UUID;
+        v_item_refund := ((v_sale_item.subtotal_item / v_sale_item.quantity) * (v_item->>'quantity')::INTEGER);
+
+        INSERT INTO public.return_items (
+            id, pharmacy_id, return_id, sale_item_id, medicine_id, batch_id, quantity, reason, condition, refund_amount, quarantined, restored_to_stock, branch_id
+        ) VALUES (
+            v_return_item_id,
+            v_pharmacy_id,
+            p_return_id, 
+            (v_item->>'sale_item_id')::UUID,
+            v_sale_item.medicine_id,
+            v_sale_item.batch_id,
+            (v_item->>'quantity')::INTEGER,
+            v_item->>'reason',
+            v_item->>'condition',
+            v_item_refund,
+            v_quarantined,
+            v_restored,
+            v_branch_id
+        );
+
+        -- Restore stock immediately if completed
+        IF v_status = 'completed' AND v_restored = TRUE THEN
+            UPDATE public.batches 
+            SET quantity_in_stock = quantity_in_stock + (v_item->>'quantity')::INTEGER
+            WHERE id = v_sale_item.batch_id;
+        END IF;
+    END LOOP;
+
+    RETURN p_return_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- 6.3 Approve Return (Admin Approval for High-Value Pending Returns)
+CREATE OR REPLACE FUNCTION public.approve_return(
+    p_return_id UUID
+) RETURNS BOOLEAN AS $$
+DECLARE
+    v_status TEXT;
+    v_item RECORD;
+BEGIN
+    IF NOT public.is_admin() THEN
+        RAISE EXCEPTION 'Requires admin role';
+    END IF;
+
+    SELECT status INTO v_status FROM public.returns WHERE id = p_return_id;
+    IF v_status != 'pending' THEN
+        RAISE EXCEPTION 'Return is not pending approval';
+    END IF;
+
+    FOR v_item IN SELECT batch_id, quantity, restored_to_stock FROM public.return_items WHERE return_id = p_return_id
+    LOOP
+        IF v_item.restored_to_stock = TRUE THEN
+            UPDATE public.batches 
+            SET quantity_in_stock = quantity_in_stock + v_item.quantity
+            WHERE id = v_item.batch_id;
+        END IF;
+    END LOOP;
+
+    UPDATE public.returns SET status = 'completed', updated_at = now() WHERE id = p_return_id;
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- 6.4 Delete Sale & Restore Stock
+CREATE OR REPLACE FUNCTION public.delete_sale_restore_stock(
+    p_sale_id UUID
+) RETURNS BOOLEAN AS $$
+DECLARE
+    v_item RECORD;
+BEGIN
+    IF NOT public.is_admin() THEN
+        RAISE EXCEPTION 'Requires admin role';
+    END IF;
+
+    FOR v_item IN SELECT batch_id, quantity FROM public.sale_items WHERE sale_id = p_sale_id
+    LOOP
+        UPDATE public.batches 
+        SET quantity_in_stock = quantity_in_stock + v_item.quantity
+        WHERE id = v_item.batch_id;
+    END LOOP;
+
+    DELETE FROM public.sales WHERE id = p_sale_id;
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- 6.5 Update Expired Batches Status
+CREATE OR REPLACE FUNCTION public.update_expired_batches()
+RETURNS VOID AS $$
+BEGIN
+    UPDATE public.batches
+    SET is_expired = TRUE
+    WHERE expiry_date < CURRENT_DATE AND is_expired = FALSE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- 6.6 Supplier Dashboard Stats RPC (Pharmacy-Scoped)
+CREATE OR REPLACE FUNCTION public.get_supplier_dashboard_stats()
+RETURNS TABLE (
+    id UUID,
+    name TEXT,
+    contact_phone TEXT,
+    contact_email TEXT,
+    branch_id UUID,
+    total_spent NUMERIC,
+    total_profit_generated NUMERIC,
+    last_purchase_date DATE
+) AS $$
+DECLARE
+    v_pharmacy_id UUID := public.get_user_pharmacy_id();
+BEGIN
+    RETURN QUERY
+    SELECT 
+        s.id,
+        s.name,
+        s.contact_phone,
+        s.contact_email,
+        s.branch_id,
+        COALESCE(b_agg.total_spent, 0) AS total_spent,
+        COALESCE(si_agg.total_profit, 0) AS total_profit_generated,
+        b_agg.last_purchase_date
+    FROM public.suppliers s
+    LEFT JOIN (
+        SELECT supplier_id, 
+               SUM(original_quantity * cost_per_unit) AS total_spent,
+               MAX(date_purchased) AS last_purchase_date
+        FROM public.batches
+        WHERE (v_pharmacy_id IS NULL OR pharmacy_id = v_pharmacy_id)
+        GROUP BY supplier_id
+    ) b_agg ON b_agg.supplier_id = s.id
+    LEFT JOIN (
+        SELECT b.supplier_id,
+               SUM(si.quantity * (si.price_at_sale - b.cost_per_unit)) AS total_profit
+        FROM public.sale_items si
+        JOIN public.batches b ON b.id = si.batch_id
+        WHERE (v_pharmacy_id IS NULL OR si.pharmacy_id = v_pharmacy_id)
+        GROUP BY b.supplier_id
+    ) si_agg ON si_agg.supplier_id = s.id
+    WHERE (v_pharmacy_id IS NULL OR s.pharmacy_id = v_pharmacy_id OR public.is_superadmin());
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- 6.7 Cross-Branch Aggregates RPC (Pharmacy-Scoped)
+CREATE OR REPLACE FUNCTION public.get_cross_branch_aggregates(p_date DATE)
+RETURNS TABLE (
+    branch_id UUID,
+    branch_name TEXT,
+    total_sales NUMERIC,
+    total_returns NUMERIC,
+    stock_value NUMERIC
+) AS $$
+DECLARE
+    v_pharmacy_id UUID := public.get_user_pharmacy_id();
+BEGIN
+    IF NOT public.can_view_all_branches() THEN
+        RAISE EXCEPTION 'Access denied. Requires can_view_all_branches privilege.';
+    END IF;
+
+    RETURN QUERY
+    SELECT 
+        b.id as branch_id,
+        b.name as branch_name,
+        COALESCE(s.total_sales, 0) as total_sales,
+        COALESCE(r.total_returns, 0) as total_returns,
+        COALESCE(v.stock_value, 0) as stock_value
+    FROM public.branches b
+    LEFT JOIN (
+        SELECT sales.branch_id, SUM(total_amount) as total_sales
+        FROM public.sales
+        WHERE date_time::DATE = p_date AND (v_pharmacy_id IS NULL OR pharmacy_id = v_pharmacy_id)
+        GROUP BY sales.branch_id
+    ) s ON s.branch_id = b.id
+    LEFT JOIN (
+        SELECT returns.branch_id, SUM(total_refund_amount) as total_returns
+        FROM public.returns
+        WHERE return_date::DATE = p_date AND status = 'completed' AND (v_pharmacy_id IS NULL OR pharmacy_id = v_pharmacy_id)
+        GROUP BY returns.branch_id
+    ) r ON r.branch_id = b.id
+    LEFT JOIN (
+        SELECT batches.branch_id, SUM(quantity_in_stock * cost_per_unit) as stock_value
+        FROM public.batches
+        WHERE quantity_in_stock > 0 AND is_expired = FALSE AND (v_pharmacy_id IS NULL OR pharmacy_id = v_pharmacy_id)
+        GROUP BY batches.branch_id
+    ) v ON v.branch_id = b.id
+    WHERE (v_pharmacy_id IS NULL OR b.pharmacy_id = v_pharmacy_id OR public.is_superadmin());
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- ------------------------------------------------------------------------------
+-- 7. DEFAULT PERMISSIONS
+-- ------------------------------------------------------------------------------
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO postgres, anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres, anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON ROUTINES TO postgres, anon, authenticated, service_role;
+
+
+-- ==============================================================================
+-- DATA SEED / RESTORE SECTION
+-- ==============================================================================
+
+-- ==============================================================================
+-- PharmaCore ERP + POS — Multi-Tenant SaaS Database Data Dump
+-- Exported on: 2026-08-20T21:49:12.656Z
+-- ==============================================================================
+
+BEGIN;
+
+SET session_replication_role = 'replica';
+
+-- ------------------------------------------------------------------------------
+-- 0. AUTH USERS (Supabase auth.users)
+-- ------------------------------------------------------------------------------
+INSERT INTO auth.users (id, email, raw_app_meta_data, raw_user_meta_data, created_at, updated_at, role, aud, encrypted_password) VALUES ('8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'admin@pharmacore.local', '{"provider":"email","providers":["email"]}'::JSONB, '{"email_verified":true,"role":"admin","username":"admin","must_change_password":true}'::JSONB, '2026-08-20T20:00:22.534663Z', '2026-08-20T21:45:41.825672Z', 'authenticated', 'authenticated', crypt(gen_random_uuid()::text, gen_salt('bf'))) ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.branches (3 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.branches (id, name, created_at, pharmacy_id) VALUES ('aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Karachi Main Branch (Saddar)', '2026-08-20T19:01:40.216875+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.branches (id, name, created_at, pharmacy_id) VALUES ('f227b52f-7bde-46f7-ada3-a0f1eced2a52', 'Lahore Branch (Gulberg III)', '2026-08-20T19:01:40.322112+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.branches (id, name, created_at, pharmacy_id) VALUES ('42c6e69b-a16f-4841-933b-9e6efdd118b2', 'Islamabad Branch (F-7 Markaz)', '2026-08-20T19:01:40.72619+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.categories (9 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('ddb4e17e-3364-4c4b-a66a-5e7fcd209c8d', 'Analgesics & Antipyretics (Pain/Fever)', 'Essential pain relief and fever reducing medicines', 0, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:43.216705+00:00', '2026-08-20T19:01:43.216705+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('f5c312b9-ad3c-44dc-b5fd-a614d9a1d5f8', 'Antibiotics & Anti-Infectives', 'Prescription antibiotics and antimicrobials', 0, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:43.318818+00:00', '2026-08-20T19:01:43.318818+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('32f83357-e384-4778-ac87-20d565eac0a9', 'Gastroenterology & Antacids', 'Acid reflux, PPIs, anti-ulcerants and digestive enzymes', 0, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:43.419445+00:00', '2026-08-20T19:01:43.419445+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('825c8641-ec2a-4456-afd3-42d6f2c97f4f', 'Anti-Allergic & Antihistamines', 'Allergy relief, cetirizine, fexofenadine, loratadine', 0, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:43.522926+00:00', '2026-08-20T19:01:43.522926+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('84a07fbd-f600-4770-8bb5-5965f74708aa', 'Cardiovascular & Anti-Hypertensives', 'Blood pressure, cholesterol and heart medications', 0, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:43.624516+00:00', '2026-08-20T19:01:43.624516+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('8f42d425-f70e-440f-8d6e-ebde5ac497aa', 'Anti-Diabetic Care', 'Oral hypoglycemics and insulin supplies', 0, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:43.724855+00:00', '2026-08-20T19:01:43.724855+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('7b845cf2-95bf-456c-a68c-f753227f264b', 'Cough, Cold & Respiratory', 'Syrups, bronchodilators, inhalers and decongestants', 0, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:44.132856+00:00', '2026-08-20T19:01:44.132856+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('013cca24-800c-4fab-8410-37d6e26950b3', 'Vitamins & Dietary Supplements', 'Multivitamins, minerals, calcium and nutritional tonics (18% GST)', 18, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:45.20991+00:00', '2026-08-20T19:01:45.20991+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.categories (id, name, description, tax_rate, branch_id, updated_at, created_at, pharmacy_id) VALUES ('c9c07d79-1e51-497a-a300-e68f9577e129', 'Topical & First Aid / Antiseptics', 'Ointments, antiseptics, bandages and skin creams', 5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:45.311694+00:00', '2026-08-20T19:01:45.311694+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.suppliers (8 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.suppliers (id, name, contact_phone, contact_email, branch_id, updated_at, created_at, pharmacy_id) VALUES ('ed7c8b95-0cc5-433c-b29b-f0b72532214b', 'Muller & Phipps Pakistan (Pvt) Ltd', '+92-21-111-674-674', 'distribution@mphilipps.pk', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:41.134405+00:00', '2026-08-20T19:01:41.134405+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.suppliers (id, name, contact_phone, contact_email, branch_id, updated_at, created_at, pharmacy_id) VALUES ('9283b8ca-2efc-448e-abde-45bd1f4ba1a1', 'Ali Gohar & Company (Pvt) Ltd', '+92-21-3453-8888', 'sales@aligohar.com.pk', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:41.239868+00:00', '2026-08-20T19:01:41.239868+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.suppliers (id, name, contact_phone, contact_email, branch_id, updated_at, created_at, pharmacy_id) VALUES ('09f25150-3e0d-4290-ad58-c57a947bca4f', 'IBL Healthcare Ltd', '+92-21-3567-4321', 'orders@iblhc.com', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:41.642898+00:00', '2026-08-20T19:01:41.642898+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.suppliers (id, name, contact_phone, contact_email, branch_id, updated_at, created_at, pharmacy_id) VALUES ('dbf9094b-e752-4c1e-a353-72f6b3cff1ed', 'Fazal Din & Sons Distributors', '+92-42-111-337-337', 'info@fazaldin.com.pk', 'f227b52f-7bde-46f7-ada3-a0f1eced2a52', '2026-08-20T19:01:42.70995+00:00', '2026-08-20T19:01:42.70995+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.suppliers (id, name, contact_phone, contact_email, branch_id, updated_at, created_at, pharmacy_id) VALUES ('3c2300fc-c381-4642-b180-7caf4a5490f2', 'Getz Pharma Distribution Network', '+92-21-111-111-511', 'dist@getzpharma.com', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:42.810475+00:00', '2026-08-20T19:01:42.810475+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.suppliers (id, name, contact_phone, contact_email, branch_id, updated_at, created_at, pharmacy_id) VALUES ('bf700228-345f-45aa-9898-8f902834ff1f', 'Searle Company Distribution Depot', '+92-21-3506-0561', 'supply@searle.com.pk', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:42.911208+00:00', '2026-08-20T19:01:42.911208+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.suppliers (id, name, contact_phone, contact_email, branch_id, updated_at, created_at, pharmacy_id) VALUES ('d174d316-eaf6-401d-9426-790cbe7100c2', 'Abbott Laboratories Distribution', '+92-21-111-222-688', 'pakistan.orders@abbott.com', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:01:43.013576+00:00', '2026-08-20T19:01:43.013576+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.suppliers (id, name, contact_phone, contact_email, branch_id, updated_at, created_at, pharmacy_id) VALUES ('c3771904-2aef-48dc-8e36-0598596d6709', 'GSK Consumer & Pharma Logistics', '+92-21-111-475-725', 'gsk.dist@gsk.com', '42c6e69b-a16f-4841-933b-9e6efdd118b2', '2026-08-20T19:01:43.116338+00:00', '2026-08-20T19:01:43.116338+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.medicines (24 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('e984e3bc-f371-406c-aa0b-431406df60d4', 'Panadol 500mg', 'Paracetamol', '896100100101', 'ddb4e17e-3364-4c4b-a66a-5e7fcd209c8d', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 20, '2026-08-20T19:01:45.412795+00:00', '2026-08-20T19:01:45.412795+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('e5c7d048-8a5f-4fb8-b79b-9670d75023fa', 'Panadol Extra', 'Paracetamol + Caffeine', '896100100102', 'ddb4e17e-3364-4c4b-a66a-5e7fcd209c8d', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 20, '2026-08-20T19:01:45.724863+00:00', '2026-08-20T19:01:45.724863+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('6de17988-d729-4de5-b8f2-7fd49011010f', 'Panadol CF (Cold & Flu)', 'Paracetamol + Pseudoephedrine + Chlorpheniramine', '896100100103', '7b845cf2-95bf-456c-a68c-f753227f264b', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 20, '2026-08-20T19:01:46.637667+00:00', '2026-08-20T19:01:46.637667+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('5addfc11-19d2-4ada-985a-9461764f5612', 'Augmentin 625mg', 'Amoxicillin + Clavulanic Acid', '896100100201', 'f5c312b9-ad3c-44dc-b5fd-a614d9a1d5f8', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 6, 10, '2026-08-20T19:01:47.247287+00:00', '2026-08-20T19:01:47.247287+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('d6c2ef8d-e7ec-4baa-854b-db8ea576b122', 'Augmentin 1g (1000mg)', 'Amoxicillin + Clavulanic Acid', '896100100202', 'f5c312b9-ad3c-44dc-b5fd-a614d9a1d5f8', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 6, 10, '2026-08-20T19:01:50.44362+00:00', '2026-08-20T19:01:50.44362+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('f3b21ee3-aea0-4752-80be-4e8f529ba682', 'Risek 20mg Capsule', 'Omeprazole', '896100100301', '32f83357-e384-4778-ac87-20d565eac0a9', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Capsule', 'Strip', 14, 2, '2026-08-20T19:01:58.572051+00:00', '2026-08-20T19:01:58.572051+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('d725ea92-33bc-4d1a-a05a-85941475d52c', 'Risek 40mg Capsule', 'Omeprazole', '896100100302', '32f83357-e384-4778-ac87-20d565eac0a9', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Capsule', 'Strip', 14, 2, '2026-08-20T19:01:58.877583+00:00', '2026-08-20T19:01:58.877583+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('997fd06a-a257-467b-9b00-1fc211221295', 'Brufen 400mg', 'Ibuprofen', '896100100401', 'ddb4e17e-3364-4c4b-a66a-5e7fcd209c8d', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 25, '2026-08-20T19:01:59.487514+00:00', '2026-08-20T19:01:59.487514+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('8df219c0-4e7b-4b93-aa1c-4a26d9e03180', 'Arinac Forte', 'Ibuprofen 400mg + Pseudoephedrine 60mg', '896100100402', '7b845cf2-95bf-456c-a68c-f753227f264b', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 10, '2026-08-20T19:01:59.792871+00:00', '2026-08-20T19:01:59.792871+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('4d160d0e-72ea-437e-8a18-bf6e11a56f3d', 'Surbex-Z High Potency Zinc', 'Zinc + Vitamin B-Complex + Vitamin C + E', '896100100501', '013cca24-800c-4fab-8410-37d6e26950b3', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Bottle', 30, 1, '2026-08-20T19:02:00.703655+00:00', '2026-08-20T19:02:00.703655+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('54a54f7c-a102-44e7-b541-cfb3bf3ef17f', 'CAC-1000 Plus Orange', 'Calcium Lactate + Carbonate + Vitamin C + D3', '896100100502', '013cca24-800c-4fab-8410-37d6e26950b3', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Tube', 10, 1, '2026-08-20T19:02:01.613403+00:00', '2026-08-20T19:02:01.613403+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('cf8f75e8-e74a-4920-8097-154f2732043b', 'Hydryllin Cough Syrup (120ml)', 'Aminophylline + Diphenhydramine + Ammonium Chloride', '896100100601', '7b845cf2-95bf-456c-a68c-f753227f264b', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Bottle', 'Bottle', 1, 1, '2026-08-20T19:02:02.527015+00:00', '2026-08-20T19:02:02.527015+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('5a9b46f5-bdfb-4c5b-8709-29d244a6fc97', 'Gaviscon Liquid Mint (120ml)', 'Sodium Alginate + Sodium Bicarbonate', '896100100303', '32f83357-e384-4778-ac87-20d565eac0a9', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Bottle', 'Bottle', 1, 1, '2026-08-20T19:02:03.235603+00:00', '2026-08-20T19:02:03.235603+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('fae24151-23b6-4fca-b37d-8d1a552ddfba', 'Glucophage 500mg', 'Metformin HCl', '896100100701', '8f42d425-f70e-440f-8d6e-ebde5ac497aa', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 50, '2026-08-20T19:02:04.55116+00:00', '2026-08-20T19:02:04.55116+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('77b6e44f-26b7-41b0-9b59-ef68c5a16ff4', 'Amaryl 2mg', 'Glimepiride', '896100100702', '8f42d425-f70e-440f-8d6e-ebde5ac497aa', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 30, '2026-08-20T19:02:05.79832+00:00', '2026-08-20T19:02:05.79832+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('c01adbcf-11ef-4ed5-a9ce-9f0a0ee5d8cf', 'Lipget 20mg', 'Atorvastatin', '896100100801', '84a07fbd-f600-4770-8bb5-5965f74708aa', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 20, '2026-08-20T19:02:06.121644+00:00', '2026-08-20T19:02:06.121644+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('7acc0787-f72f-4650-8e31-30356325f7c1', 'Concor 5mg', 'Bisoprolol Fumarate', '896100100802', '84a07fbd-f600-4770-8bb5-5965f74708aa', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 14, 2, '2026-08-20T19:02:06.432284+00:00', '2026-08-20T19:02:06.432284+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('2b041bdf-dee5-437d-b79d-9e6960ade4d0', 'Rigix 10mg', 'Cetirizine 2HCl', '896100100901', '825c8641-ec2a-4456-afd3-42d6f2c97f4f', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 30, '2026-08-20T19:02:06.744437+00:00', '2026-08-20T19:02:06.744437+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('d37eb3c0-dfc6-454a-b8d8-6709ce9d3b00', 'Softin 10mg', 'Loratadine', '896100100902', '825c8641-ec2a-4456-afd3-42d6f2c97f4f', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 10, '2026-08-20T19:02:07.04679+00:00', '2026-08-20T19:02:07.04679+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('04109426-f514-41a6-bfd8-b5ce118e1fb8', 'Flagyl 400mg', 'Metronidazole', '896100101001', 'f5c312b9-ad3c-44dc-b5fd-a614d9a1d5f8', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 20, '2026-08-20T19:02:07.653129+00:00', '2026-08-20T19:02:07.653129+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('a63f9053-b809-4608-84bd-cab365b1e663', 'Ponstan 500mg', 'Mefenamic Acid', '896100100403', 'ddb4e17e-3364-4c4b-a66a-5e7fcd209c8d', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 25, '2026-08-20T19:02:08.89454+00:00', '2026-08-20T19:02:08.89454+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('63ebbec1-f73a-4391-a1da-6a70a1edf687', 'Cefspan 400mg', 'Cefixime', '896100100203', 'f5c312b9-ad3c-44dc-b5fd-a614d9a1d5f8', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Capsule', 'Strip', 5, 1, '2026-08-20T19:02:09.198611+00:00', '2026-08-20T19:02:09.198611+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('56b8e8a1-24f1-4f75-9276-81fe46eb1872', 'Pyodine Solution 10% (60ml)', 'Povidone Iodine', '896100101101', 'c9c07d79-1e51-497a-a300-e68f9577e129', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Bottle', 'Bottle', 1, 1, '2026-08-20T19:02:09.807298+00:00', '2026-08-20T19:02:09.807298+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.medicines (id, name, generic_name, barcode, category_id, branch_id, unit_name, packaging_name, units_per_packaging, packaging_per_box, created_at, updated_at, is_active, pharmacy_id) VALUES ('3648cbdb-47b6-482f-be96-fdb55e4bdd0f', 'Disprin 300mg Soluble', 'Aspirin (Acetylsalicylic acid)', '896100100404', 'ddb4e17e-3364-4c4b-a66a-5e7fcd209c8d', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', 'Tablet', 'Strip', 10, 30, '2026-08-20T19:02:10.414073+00:00', '2026-08-20T19:02:10.414073+00:00', TRUE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.batches (48 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('7152ebfa-8322-4915-90f7-ccb552bd97eb', 'e984e3bc-f371-406c-aa0b-431406df60d4', 'PAK-25-101B', '2028-08-09', 'ed7c8b95-0cc5-433c-b29b-f0b72532214b', 240, 2.8, 3.5, '2026-08-20T19:01:45.622831+00:00', '2026-08-15', FALSE, '2026-08-20T19:01:45.622831+00:00', '2026-08-20T19:01:45.622831+00:00', 240, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('ac21b857-5a26-41dc-86c2-ba6df64b0fa2', 'e5c7d048-8a5f-4fb8-b79b-9670d75023fa', 'PAK-25-102B', '2028-08-09', '9283b8ca-2efc-448e-abde-45bd1f4ba1a1', 180, 3.2, 4.2, '2026-08-20T19:01:46.235107+00:00', '2026-08-15', FALSE, '2026-08-20T19:01:46.235107+00:00', '2026-08-20T19:01:46.235107+00:00', 180, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('fc437e8b-9dad-4a45-bfc5-02f8c7a2c055', '6de17988-d729-4de5-b8f2-7fd49011010f', 'PAK-25-103B', '2028-08-09', '09f25150-3e0d-4290-ad58-c57a947bca4f', 150, 4.5, 6, '2026-08-20T19:01:46.840618+00:00', '2026-08-15', FALSE, '2026-08-20T19:01:46.840618+00:00', '2026-08-20T19:01:46.840618+00:00', 150, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('8ead7d59-d987-47e2-97d9-57cb71c9118a', '5addfc11-19d2-4ada-985a-9461764f5612', 'PAK-25-201B', '2028-08-09', 'dbf9094b-e752-4c1e-a353-72f6b3cff1ed', 108, 32, 42.5, '2026-08-20T19:01:49.939144+00:00', '2026-08-15', FALSE, '2026-08-20T19:01:49.939144+00:00', '2026-08-20T19:01:49.939144+00:00', 108, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('04d93750-2d6e-468a-80c6-47bc3e06aa14', 'd6c2ef8d-e7ec-4baa-854b-db8ea576b122', 'PAK-24-202A', '2027-02-16', '3c2300fc-c381-4642-b180-7caf4a5490f2', 48, 52, 68, '2026-08-20T19:01:58.06756+00:00', '2026-07-21', FALSE, '2026-08-20T19:01:58.06756+00:00', '2026-08-20T19:01:58.06756+00:00', 48, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('8f9fef63-c9da-46ed-8794-cbdc0f6dfdf7', 'd6c2ef8d-e7ec-4baa-854b-db8ea576b122', 'PAK-25-202B', '2028-08-09', '3c2300fc-c381-4642-b180-7caf4a5490f2', 72, 52, 68, '2026-08-20T19:01:58.170921+00:00', '2026-08-15', FALSE, '2026-08-20T19:01:58.170921+00:00', '2026-08-20T19:01:58.170921+00:00', 72, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('82fc7147-aa62-486f-9566-77ae261930d6', 'f3b21ee3-aea0-4752-80be-4e8f529ba682', 'PAK-24-301A', '2027-02-16', 'bf700228-345f-45aa-9898-8f902834ff1f', 112, 16.5, 22, '2026-08-20T19:01:58.674522+00:00', '2026-07-21', FALSE, '2026-08-20T19:01:58.674522+00:00', '2026-08-20T19:01:58.674522+00:00', 112, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('57beb8e5-a3ec-42b8-a996-5ce77082f28d', 'f3b21ee3-aea0-4752-80be-4e8f529ba682', 'PAK-25-301B', '2028-08-09', 'bf700228-345f-45aa-9898-8f902834ff1f', 168, 16.5, 22, '2026-08-20T19:01:58.775964+00:00', '2026-08-15', FALSE, '2026-08-20T19:01:58.775964+00:00', '2026-08-20T19:01:58.775964+00:00', 168, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('a1c811d6-9037-4234-b11b-b20d1e77f4f2', 'd725ea92-33bc-4d1a-a05a-85941475d52c', 'PAK-25-302B', '2028-08-09', 'd174d316-eaf6-401d-9426-790cbe7100c2', 120, 28, 37, '2026-08-20T19:01:59.385943+00:00', '2026-08-15', FALSE, '2026-08-20T19:01:59.385943+00:00', '2026-08-20T19:01:59.385943+00:00', 120, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('76a30030-aa59-4486-978b-585a41ad470d', '997fd06a-a257-467b-9b00-1fc211221295', 'PAK-25-401B', '2028-08-09', 'c3771904-2aef-48dc-8e36-0598596d6709', 300, 3.8, 5, '2026-08-20T19:01:59.692416+00:00', '2026-08-15', FALSE, '2026-08-20T19:01:59.692416+00:00', '2026-08-20T19:01:59.692416+00:00', 300, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('acce51fb-8f16-4f9c-b549-62d53adef67d', '8df219c0-4e7b-4b93-aa1c-4a26d9e03180', 'PAK-24-402A', '2027-02-16', 'ed7c8b95-0cc5-433c-b29b-f0b72532214b', 88, 8.5, 11.5, '2026-08-20T19:02:00.502434+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:00.502434+00:00', '2026-08-20T19:02:00.502434+00:00', 88, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('ee916772-c99c-4d85-9629-f0a616425319', '8df219c0-4e7b-4b93-aa1c-4a26d9e03180', 'PAK-25-402B', '2028-08-09', 'ed7c8b95-0cc5-433c-b29b-f0b72532214b', 132, 8.5, 11.5, '2026-08-20T19:02:00.603614+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:00.603614+00:00', '2026-08-20T19:02:00.603614+00:00', 132, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('8edabe35-10ae-4823-94f6-6c3d0e70bfbe', '4d160d0e-72ea-437e-8a18-bf6e11a56f3d', 'PAK-24-501A', '2027-02-16', '9283b8ca-2efc-448e-abde-45bd1f4ba1a1', 60, 10, 14, '2026-08-20T19:02:00.806049+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:00.806049+00:00', '2026-08-20T19:02:00.806049+00:00', 60, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('9b6dca1f-78c8-42c4-9e15-f063614a114a', '4d160d0e-72ea-437e-8a18-bf6e11a56f3d', 'PAK-25-501B', '2028-08-09', '9283b8ca-2efc-448e-abde-45bd1f4ba1a1', 90, 10, 14, '2026-08-20T19:02:00.907436+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:00.907436+00:00', '2026-08-20T19:02:00.907436+00:00', 90, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('6d92af15-d395-40b7-9442-d5d8f198f2c1', '54a54f7c-a102-44e7-b541-cfb3bf3ef17f', 'PAK-24-502A', '2027-02-16', '09f25150-3e0d-4290-ad58-c57a947bca4f', 64, 25, 34.5, '2026-08-20T19:02:01.715363+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:01.715363+00:00', '2026-08-20T19:02:01.715363+00:00', 64, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('b692d9e5-cf17-423d-95fa-7a8fd7fe2ed4', '54a54f7c-a102-44e7-b541-cfb3bf3ef17f', 'PAK-25-502B', '2028-08-09', '09f25150-3e0d-4290-ad58-c57a947bca4f', 96, 25, 34.5, '2026-08-20T19:02:02.117464+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:02.117464+00:00', '2026-08-20T19:02:02.117464+00:00', 96, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('6b99e2a8-e71b-49e4-8399-31ffffb6800c', 'cf8f75e8-e74a-4920-8097-154f2732043b', 'PAK-24-601A', '2027-02-16', 'dbf9094b-e752-4c1e-a353-72f6b3cff1ed', 32, 110, 145, '2026-08-20T19:02:03.030577+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:03.030577+00:00', '2026-08-20T19:02:03.030577+00:00', 32, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('5a56d340-8d2b-462e-ba1b-0f57f449af6a', 'cf8f75e8-e74a-4920-8097-154f2732043b', 'PAK-25-601B', '2028-08-09', 'dbf9094b-e752-4c1e-a353-72f6b3cff1ed', 48, 110, 145, '2026-08-20T19:02:03.132263+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:03.132263+00:00', '2026-08-20T19:02:03.132263+00:00', 48, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('6812082b-62eb-4212-9f96-36d9d1b75ebb', '5a9b46f5-bdfb-4c5b-8709-29d244a6fc97', 'PAK-24-303A', '2027-02-16', '3c2300fc-c381-4642-b180-7caf4a5490f2', 24, 180, 235, '2026-08-20T19:02:03.336788+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:03.336788+00:00', '2026-08-20T19:02:03.336788+00:00', 24, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('28281302-0753-4bd4-8b1e-98212a474ad6', '5a9b46f5-bdfb-4c5b-8709-29d244a6fc97', 'PAK-25-303B', '2028-08-09', '3c2300fc-c381-4642-b180-7caf4a5490f2', 36, 180, 235, '2026-08-20T19:02:04.044578+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:04.044578+00:00', '2026-08-20T19:02:04.044578+00:00', 36, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('d2691818-0267-4c9e-837e-d01f40d695b2', 'fae24151-23b6-4fca-b37d-8d1a552ddfba', 'PAK-24-701A', '2027-02-16', 'bf700228-345f-45aa-9898-8f902834ff1f', 240, 3.5, 4.8, '2026-08-20T19:02:05.287231+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:05.287231+00:00', '2026-08-20T19:02:05.287231+00:00', 240, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('bb8bfdb5-3eec-42b6-bdc4-db561a353470', 'fae24151-23b6-4fca-b37d-8d1a552ddfba', 'PAK-25-701B', '2028-08-09', 'bf700228-345f-45aa-9898-8f902834ff1f', 360, 3.5, 4.8, '2026-08-20T19:02:05.38895+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:05.38895+00:00', '2026-08-20T19:02:05.38895+00:00', 360, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('f2e89304-f016-4c7c-b6b4-378f0e3c3b48', '77b6e44f-26b7-41b0-9b59-ef68c5a16ff4', 'PAK-24-702A', '2027-02-16', 'd174d316-eaf6-401d-9426-790cbe7100c2', 120, 14, 19.5, '2026-08-20T19:02:05.902407+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:05.902407+00:00', '2026-08-20T19:02:05.902407+00:00', 120, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('f224ac1e-5383-4900-9def-6bf00feca2f8', '77b6e44f-26b7-41b0-9b59-ef68c5a16ff4', 'PAK-25-702B', '2028-08-09', 'd174d316-eaf6-401d-9426-790cbe7100c2', 180, 14, 19.5, '2026-08-20T19:02:06.007728+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:06.007728+00:00', '2026-08-20T19:02:06.007728+00:00', 180, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('b821a191-3180-43d9-98ce-d8d9d05d6626', 'c01adbcf-11ef-4ed5-a9ce-9f0a0ee5d8cf', 'PAK-24-801A', '2027-02-16', 'c3771904-2aef-48dc-8e36-0598596d6709', 100, 22, 30, '2026-08-20T19:02:06.225947+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:06.225947+00:00', '2026-08-20T19:02:06.225947+00:00', 100, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('84f95160-32e3-4bcd-9a60-14953d563e70', 'c01adbcf-11ef-4ed5-a9ce-9f0a0ee5d8cf', 'PAK-25-801B', '2028-08-09', 'c3771904-2aef-48dc-8e36-0598596d6709', 150, 22, 30, '2026-08-20T19:02:06.330111+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:06.330111+00:00', '2026-08-20T19:02:06.330111+00:00', 150, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('dae7e711-a4bb-40b3-b2a8-f93445791a9d', '7acc0787-f72f-4650-8e31-30356325f7c1', 'PAK-24-802A', '2027-02-16', 'ed7c8b95-0cc5-433c-b29b-f0b72532214b', 84, 18, 24.5, '2026-08-20T19:02:06.540255+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:06.540255+00:00', '2026-08-20T19:02:06.540255+00:00', 84, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('ab2d7818-8f5a-4586-acd5-24cf4e97df36', '7acc0787-f72f-4650-8e31-30356325f7c1', 'PAK-25-802B', '2028-08-09', 'ed7c8b95-0cc5-433c-b29b-f0b72532214b', 126, 18, 24.5, '2026-08-20T19:02:06.64208+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:06.64208+00:00', '2026-08-20T19:02:06.64208+00:00', 126, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('74e2e09d-1877-4d3e-83cf-626456be5040', '2b041bdf-dee5-437d-b79d-9e6960ade4d0', 'PAK-24-901A', '2027-02-16', '9283b8ca-2efc-448e-abde-45bd1f4ba1a1', 140, 7, 9.8, '2026-08-20T19:02:06.844738+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:06.844738+00:00', '2026-08-20T19:02:06.844738+00:00', 140, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('3773151a-a4ce-4cf3-a58b-52b66f4a209d', '2b041bdf-dee5-437d-b79d-9e6960ade4d0', 'PAK-25-901B', '2028-08-09', '9283b8ca-2efc-448e-abde-45bd1f4ba1a1', 210, 7, 9.8, '2026-08-20T19:02:06.945402+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:06.945402+00:00', '2026-08-20T19:02:06.945402+00:00', 210, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('3329325e-e0ec-409d-9d55-012bc2ba7a21', 'd37eb3c0-dfc6-454a-b8d8-6709ce9d3b00', 'PAK-24-902A', '2027-02-16', '09f25150-3e0d-4290-ad58-c57a947bca4f', 80, 9, 12.5, '2026-08-20T19:02:07.147466+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:07.147466+00:00', '2026-08-20T19:02:07.147466+00:00', 80, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('710f7f92-57f4-473e-a889-8b5b001e6e0d', 'd37eb3c0-dfc6-454a-b8d8-6709ce9d3b00', 'PAK-25-902B', '2028-08-09', '09f25150-3e0d-4290-ad58-c57a947bca4f', 120, 9, 12.5, '2026-08-20T19:02:07.24886+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:07.24886+00:00', '2026-08-20T19:02:07.24886+00:00', 120, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('4ad9c9f1-8f9c-447a-8425-0d282d80f8c7', '04109426-f514-41a6-bfd8-b5ce118e1fb8', 'PAK-24-001A', '2027-02-16', 'dbf9094b-e752-4c1e-a353-72f6b3cff1ed', 160, 4.2, 5.8, '2026-08-20T19:02:08.693405+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:08.693405+00:00', '2026-08-20T19:02:08.693405+00:00', 160, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('0f5cfc92-97e0-400c-96ec-cbaaf836ede1', '04109426-f514-41a6-bfd8-b5ce118e1fb8', 'PAK-25-001B', '2028-08-09', 'dbf9094b-e752-4c1e-a353-72f6b3cff1ed', 240, 4.2, 5.8, '2026-08-20T19:02:08.793652+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:08.793652+00:00', '2026-08-20T19:02:08.793652+00:00', 240, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('47cbf0c3-b4dc-43bc-83dc-422f822e0c6b', 'a63f9053-b809-4608-84bd-cab365b1e663', 'PAK-24-403A', '2027-02-16', '3c2300fc-c381-4642-b180-7caf4a5490f2', 180, 4.8, 6.5, '2026-08-20T19:02:08.997296+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:08.997296+00:00', '2026-08-20T19:02:08.997296+00:00', 180, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('66f5ac7f-d3b2-4281-9f99-b2c514de69bb', 'a63f9053-b809-4608-84bd-cab365b1e663', 'PAK-25-403B', '2028-08-09', '3c2300fc-c381-4642-b180-7caf4a5490f2', 270, 4.8, 6.5, '2026-08-20T19:02:09.097753+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:09.097753+00:00', '2026-08-20T19:02:09.097753+00:00', 270, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('403d425e-2346-4e6a-bba9-7873566292f4', '63ebbec1-f73a-4391-a1da-6a70a1edf687', 'PAK-24-203A', '2027-02-16', 'bf700228-345f-45aa-9898-8f902834ff1f', 36, 65, 85, '2026-08-20T19:02:09.606587+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:09.606587+00:00', '2026-08-20T19:02:09.606587+00:00', 36, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('0d57610a-d22b-468e-a11a-c4591fb29abf', '63ebbec1-f73a-4391-a1da-6a70a1edf687', 'PAK-25-203B', '2028-08-09', 'bf700228-345f-45aa-9898-8f902834ff1f', 54, 65, 85, '2026-08-20T19:02:09.706818+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:09.706818+00:00', '2026-08-20T19:02:09.706818+00:00', 54, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('cad99c9a-d5ee-488b-bcdf-4fdcb1d4ef0a', '56b8e8a1-24f1-4f75-9276-81fe46eb1872', 'PAK-24-101A', '2027-02-16', 'd174d316-eaf6-401d-9426-790cbe7100c2', 40, 85, 110, '2026-08-20T19:02:09.907811+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:09.907811+00:00', '2026-08-20T19:02:09.907811+00:00', 40, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('25503d99-69f9-449c-a14f-963ba9ab0b5e', '56b8e8a1-24f1-4f75-9276-81fe46eb1872', 'PAK-25-101B', '2028-08-09', 'd174d316-eaf6-401d-9426-790cbe7100c2', 60, 85, 110, '2026-08-20T19:02:10.008263+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:10.008263+00:00', '2026-08-20T19:02:10.008263+00:00', 60, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('65c70cab-c0ee-4663-b973-9591bfe2e664', '3648cbdb-47b6-482f-be96-fdb55e4bdd0f', 'PAK-24-404A', '2027-02-16', 'c3771904-2aef-48dc-8e36-0598596d6709', 200, 2, 2.7, '2026-08-20T19:02:11.447184+00:00', '2026-07-21', FALSE, '2026-08-20T19:02:11.447184+00:00', '2026-08-20T19:02:11.447184+00:00', 200, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('f3cb30d2-b779-45c9-82db-8ce5440606b8', '3648cbdb-47b6-482f-be96-fdb55e4bdd0f', 'PAK-25-404B', '2028-08-09', 'c3771904-2aef-48dc-8e36-0598596d6709', 300, 2, 2.7, '2026-08-20T19:02:13.171976+00:00', '2026-08-15', FALSE, '2026-08-20T19:02:13.171976+00:00', '2026-08-20T19:02:13.171976+00:00', 300, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('653b3e92-dc2d-48e6-9232-06546ab67c48', 'd725ea92-33bc-4d1a-a05a-85941475d52c', 'PAK-24-302A', '2027-02-16', 'd174d316-eaf6-401d-9426-790cbe7100c2', 79, 28, 37, '2026-08-20T19:01:59.283662+00:00', '2026-07-21', FALSE, '2026-08-20T19:01:59.283662+00:00', '2026-08-20T19:01:59.283662+00:00', 80, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('61deb2f9-01c2-4f14-847e-e180f8a20604', 'e984e3bc-f371-406c-aa0b-431406df60d4', 'PAK-24-101A', '2027-02-16', 'ed7c8b95-0cc5-433c-b29b-f0b72532214b', 159, 2.8, 3.5, '2026-08-20T19:01:45.519527+00:00', '2026-07-21', FALSE, '2026-08-20T19:01:45.519527+00:00', '2026-08-20T19:01:45.519527+00:00', 160, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('3509ff0d-868a-4eb7-b21c-9ba19a6c1c29', '997fd06a-a257-467b-9b00-1fc211221295', 'PAK-24-401A', '2027-02-16', 'c3771904-2aef-48dc-8e36-0598596d6709', 198, 3.8, 5, '2026-08-20T19:01:59.590086+00:00', '2026-07-21', FALSE, '2026-08-20T19:01:59.590086+00:00', '2026-08-20T19:01:59.590086+00:00', 200, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('55789bba-5fd3-48e1-ade4-c1db733a01ec', '5addfc11-19d2-4ada-985a-9461764f5612', 'PAK-24-201A', '2027-02-16', 'dbf9094b-e752-4c1e-a353-72f6b3cff1ed', 69, 32, 42.5, '2026-08-20T19:01:47.350749+00:00', '2026-07-21', FALSE, '2026-08-20T19:01:47.350749+00:00', '2026-08-20T19:01:47.350749+00:00', 72, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('383858c1-18b0-4816-a933-7b7af0501d02', 'e5c7d048-8a5f-4fb8-b79b-9670d75023fa', 'PAK-24-102A', '2027-02-16', '9283b8ca-2efc-448e-abde-45bd1f4ba1a1', 118, 3.2, 4.2, '2026-08-20T19:01:46.132579+00:00', '2026-07-21', FALSE, '2026-08-20T19:01:46.132579+00:00', '2026-08-20T19:01:46.132579+00:00', 120, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.batches (id, medicine_id, batch_number, expiry_date, supplier_id, quantity_in_stock, cost_per_unit, selling_price, date_added, date_purchased, is_expired, updated_at, created_at, original_quantity, branch_id, pharmacy_id) VALUES ('df664f34-9bdd-4f63-aace-7c669ee2454e', '6de17988-d729-4de5-b8f2-7fd49011010f', 'PAK-24-103A', '2027-02-16', '09f25150-3e0d-4290-ad58-c57a947bca4f', 98, 4.5, 6, '2026-08-20T19:01:46.740117+00:00', '2026-07-21', FALSE, '2026-08-20T19:01:46.740117+00:00', '2026-08-20T19:01:46.740117+00:00', 100, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.customers (6 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.customers (id, full_name, phone, cnic, address, branch_id, created_at, updated_at, pharmacy_id) VALUES ('7d694225-a7d6-4070-b88b-9ca52ca98aa6', 'Muhammad Tariq', '0300-8245192', '42101-1827391-1', 'Clifton Block 5, Karachi', NULL, '2026-08-20T19:56:46.896511+00:00', '2026-08-20T19:56:46.896511+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.customers (id, full_name, phone, cnic, address, branch_id, created_at, updated_at, pharmacy_id) VALUES ('be18c84d-db9f-4755-b5c8-4c24143b8d7a', 'Fatima Zahra', '0321-9482103', '42201-9281729-2', 'Gulshan-e-Iqbal Block 13-D, Karachi', NULL, '2026-08-20T19:56:46.896511+00:00', '2026-08-20T19:56:46.896511+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.customers (id, full_name, phone, cnic, address, branch_id, created_at, updated_at, pharmacy_id) VALUES ('398061cc-e6e9-4ba5-b9f3-b01445a63299', 'Abdul Rehman', '0333-2819401', '35202-8172938-5', 'DHA Phase 6, Lahore', NULL, '2026-08-20T19:56:46.896511+00:00', '2026-08-20T19:56:46.896511+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.customers (id, full_name, phone, cnic, address, branch_id, created_at, updated_at, pharmacy_id) VALUES ('37a34a11-1895-46c1-b7bd-26f3a5a30ec1', 'Ayesha Malik', '0345-5192830', '37405-1928374-4', 'F-10/2, Islamabad', NULL, '2026-08-20T19:56:46.896511+00:00', '2026-08-20T19:56:46.896511+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.customers (id, full_name, phone, cnic, address, branch_id, created_at, updated_at, pharmacy_id) VALUES ('4a47c11d-0431-4308-83ea-d23eef17621a', 'Zubair Ahmed Khan', '0312-7382910', '42301-7261829-3', 'North Nazimabad Block H, Karachi', NULL, '2026-08-20T19:56:46.896511+00:00', '2026-08-20T19:56:46.896511+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.customers (id, full_name, phone, cnic, address, branch_id, created_at, updated_at, pharmacy_id) VALUES ('239121d9-6fcc-4eb9-8ae1-7c4737e54d8f', 'we', 'qw', 'qw', 'qw', NULL, '2026-08-20T20:02:12.765369+00:00', '2026-08-20T20:02:12.765369+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.sales (26 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('1b3be868-77e9-48ba-88ab-ee4c86c9b3cb', '2026-08-09T19:02:16.116425+00:00', 73.5, 0, 73.5, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:16.116425+00:00', '2026-08-09T19:02:16.116425+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('67d7a53b-8457-45ec-9a1f-c031fcdf117a', '2026-08-20T19:02:16.429587+00:00', 352.5, 11, 363.5, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:16.429587+00:00', '2026-08-20T19:02:16.429587+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('0c14de14-5cbb-4ab2-84f1-119f5939e290', '2026-08-08T19:02:16.839756+00:00', 39.1, 0, 39.1, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:16.839756+00:00', '2026-08-08T19:02:16.839756+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('8e855729-d2c5-4b87-a9dc-0d205ae2a18d', '2026-08-07T19:02:17.252495+00:00', 97.9, 0, 97.9, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:17.252495+00:00', '2026-08-07T19:02:17.252495+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('167b4a5a-5a47-40ce-bfc9-933231f3f79e', '2026-08-17T19:02:17.664443+00:00', 260.5, 0, 260.5, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:17.664443+00:00', '2026-08-17T19:02:17.664443+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('9d1c1ebe-74f2-4469-a5b7-07cddb0fedd1', '2026-08-12T19:02:18.089111+00:00', 188.5, 18.63, 207.13, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:18.089111+00:00', '2026-08-12T19:02:18.089111+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('b7d8f368-41dd-41a5-839d-c4426a7f47c2', '2026-08-20T19:02:18.394304+00:00', 69, 12.42, 81.42, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:18.394304+00:00', '2026-08-20T19:02:18.394304+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('0adc3748-f6c6-41e6-aacc-3a8292313d7e', '2026-08-15T19:02:19.204371+00:00', 112.6, 0, 112.6, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:19.204371+00:00', '2026-08-15T19:02:19.204371+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('f061c010-2b21-4d26-95df-38d2a82a980d', '2026-08-14T19:02:19.612301+00:00', 470, 0, 470, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:19.612301+00:00', '2026-08-14T19:02:19.612301+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('32fdd72d-0c5d-4ba0-8d01-362f670aee75', '2026-08-13T19:02:19.81626+00:00', 25.5, 0, 25.5, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:19.81626+00:00', '2026-08-13T19:02:19.81626+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('b04a35b1-b8c7-4657-9930-d3202eb1150f', '2026-08-07T19:02:21.332297+00:00', 90, 0, 90, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:21.332297+00:00', '2026-08-07T19:02:21.332297+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('538bce37-b8ae-46a5-b73a-987791d8e0c8', '2026-08-13T19:02:21.535081+00:00', 131, 0, 131, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:21.535081+00:00', '2026-08-13T19:02:21.535081+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('c7cc6289-109c-4d7a-b064-b6c4aba98175', '2026-08-08T19:02:23.18186+00:00', 134, 0, 134, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:23.18186+00:00', '2026-08-08T19:02:23.18186+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('b9585c1e-e30a-4feb-8bea-0ef0f2f860ae', '2026-08-18T19:02:23.791943+00:00', 204, 0, 204, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:23.791943+00:00', '2026-08-18T19:02:23.791943+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('a54b75b2-200f-498e-8cab-55e4198a390d', '2026-08-07T19:02:24.20189+00:00', 148.5, 0, 148.5, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:24.20189+00:00', '2026-08-07T19:02:24.20189+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('d4babf0e-2804-44be-a397-501e3e3a6123', '2026-08-13T19:02:25.533787+00:00', 74, 0, 74, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:25.533787+00:00', '2026-08-13T19:02:25.533787+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('93fb9a65-8d1d-40fa-be72-027c6767ff47', '2026-08-13T19:02:27.181074+00:00', 33.9, 0, 33.9, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:27.181074+00:00', '2026-08-13T19:02:27.181074+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('e92e82d5-2d1c-4d81-8f1c-7f6505a0022a', '2026-08-16T19:02:28.415986+00:00', 163.5, 0, 163.5, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:28.415986+00:00', '2026-08-16T19:02:28.415986+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('6cbba39a-abba-4dcf-bc73-dcca57607c7c', '2026-08-16T19:02:30.356274+00:00', 10.6, 0, 10.6, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:30.356274+00:00', '2026-08-16T19:02:30.356274+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('d37843c5-b667-474c-84b4-182c98cc2039', '2026-08-16T19:02:30.960462+00:00', 264.5, 11, 275.5, NULL, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T19:02:30.960462+00:00', '2026-08-16T19:02:30.960462+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('8d262ce8-cc4b-4b2b-a83b-dc1be4a2dabc', '2026-08-20T20:03:18.308+00:00', 42, 0, 42, '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T20:03:18.271742+00:00', '2026-08-20T20:03:18.271742+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('023bb622-9c23-47f2-8e26-b8ed18729f88', '2026-08-20T20:06:43.276+00:00', 5, 0, 5, '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T20:06:43.233752+00:00', '2026-08-20T20:06:43.233752+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('edb4070b-0726-431f-990b-b2b894dbd09f', '2026-08-20T20:08:03.141+00:00', 4.2, 0, 4.2, '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T20:08:03.088093+00:00', '2026-08-20T20:08:03.088093+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('a13701e3-2324-4f2c-813e-90418d05ad07', '2026-08-20T20:09:28.332+00:00', 42.5, 0, 42.5, '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T20:09:28.27287+00:00', '2026-08-20T20:09:28.27287+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('a9852279-8d63-45fb-b888-b44ff0df91de', '2026-08-20T20:09:39.185+00:00', 48.5, 0, 48.5, '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T20:09:39.12404+00:00', '2026-08-20T20:09:39.12404+00:00', NULL, NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sales (id, date_time, subtotal, total_tax, total_amount, cashier_user_id, branch_id, updated_at, created_at, customer_id, prescription_id, pharmacy_id) VALUES ('6203f24f-07cf-4285-859e-4b4f1b068f85', '2026-08-20T20:18:20.015+00:00', 56.2, 0, 56.2, '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '2026-08-20T20:18:19.934508+00:00', '2026-08-20T20:18:19.934508+00:00', '37a34a11-1895-46c1-b7bd-26f3a5a30ec1', NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.sale_items (58 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('7e9ea7b6-79fd-40e6-9181-e5d19b9f7df3', '1b3be868-77e9-48ba-88ab-ee4c86c9b3cb', '7acc0787-f72f-4650-8e31-30356325f7c1', 'dae7e711-a4bb-40b3-b2a8-f93445791a9d', 'PAK-24-802A', 'Concor 5mg', 2, 24.5, 0, 0, 49, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('89eb6ad4-7328-4cd2-9b64-ddf406a7b05d', '1b3be868-77e9-48ba-88ab-ee4c86c9b3cb', '7acc0787-f72f-4650-8e31-30356325f7c1', 'ab2d7818-8f5a-4586-acd5-24cf4e97df36', 'PAK-25-802B', 'Concor 5mg', 1, 24.5, 0, 0, 24.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('5c0c5ec9-56cb-4c73-a441-673dc28953c3', '67d7a53b-8457-45ec-9a1f-c031fcdf117a', 'd725ea92-33bc-4d1a-a05a-85941475d52c', '653b3e92-dc2d-48e6-9232-06546ab67c48', 'PAK-24-302A', 'Risek 40mg Capsule', 2, 37, 0, 0, 74, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('37601639-4be5-4da3-be36-7a65ed455ada', '67d7a53b-8457-45ec-9a1f-c031fcdf117a', '77b6e44f-26b7-41b0-9b59-ef68c5a16ff4', 'f224ac1e-5383-4900-9def-6bf00feca2f8', 'PAK-25-702B', 'Amaryl 2mg', 3, 19.5, 0, 0, 58.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('b1612c0b-e8bc-4598-9a35-a9bc6ff0fb07', '67d7a53b-8457-45ec-9a1f-c031fcdf117a', '56b8e8a1-24f1-4f75-9276-81fe46eb1872', 'cad99c9a-d5ee-488b-bcdf-4fdcb1d4ef0a', 'PAK-24-101A', 'Pyodine Solution 10% (60ml)', 2, 110, 5, 11, 220, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('70ba2e98-e5fa-482e-8e9f-b6ca77067558', '0c14de14-5cbb-4ab2-84f1-119f5939e290', '8df219c0-4e7b-4b93-aa1c-4a26d9e03180', 'ee916772-c99c-4d85-9629-f0a616425319', 'PAK-25-402B', 'Arinac Forte', 2, 11.5, 0, 0, 23, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('7e9d94ee-477f-4268-837e-c118e22cae29', '0c14de14-5cbb-4ab2-84f1-119f5939e290', 'fae24151-23b6-4fca-b37d-8d1a552ddfba', 'd2691818-0267-4c9e-837e-d01f40d695b2', 'PAK-24-701A', 'Glucophage 500mg', 2, 4.8, 0, 0, 9.6, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('62f84af4-610e-4237-83a7-d745bdb504d9', '0c14de14-5cbb-4ab2-84f1-119f5939e290', 'a63f9053-b809-4608-84bd-cab365b1e663', '47cbf0c3-b4dc-43bc-83dc-422f822e0c6b', 'PAK-24-403A', 'Ponstan 500mg', 1, 6.5, 0, 0, 6.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('2e8dc4fb-04b6-435f-9120-c26b2950fde7', '8e855729-d2c5-4b87-a9dc-0d205ae2a18d', 'fae24151-23b6-4fca-b37d-8d1a552ddfba', 'bb8bfdb5-3eec-42b6-bdc4-db561a353470', 'PAK-25-701B', 'Glucophage 500mg', 3, 4.8, 0, 0, 14.4, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('0e74e5d3-9b7f-4ef2-96fe-a83aaccf70e8', '8e855729-d2c5-4b87-a9dc-0d205ae2a18d', '77b6e44f-26b7-41b0-9b59-ef68c5a16ff4', 'f2e89304-f016-4c7c-b6b4-378f0e3c3b48', 'PAK-24-702A', 'Amaryl 2mg', 3, 19.5, 0, 0, 58.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('674b85fe-1bfd-4756-aac9-51353e1d18de', '8e855729-d2c5-4b87-a9dc-0d205ae2a18d', 'd37eb3c0-dfc6-454a-b8d8-6709ce9d3b00', '710f7f92-57f4-473e-a889-8b5b001e6e0d', 'PAK-25-902B', 'Softin 10mg', 2, 12.5, 0, 0, 25, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('0a59922e-f396-4cc6-8716-6d9429e7ef89', '167b4a5a-5a47-40ce-bfc9-933231f3f79e', 'd6c2ef8d-e7ec-4baa-854b-db8ea576b122', '04d93750-2d6e-468a-80c6-47bc3e06aa14', 'PAK-24-202A', 'Augmentin 1g (1000mg)', 3, 68, 0, 0, 204, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('a2a68a23-f235-4e0a-aeae-a9d18bf1e704', '167b4a5a-5a47-40ce-bfc9-933231f3f79e', '8df219c0-4e7b-4b93-aa1c-4a26d9e03180', 'acce51fb-8f16-4f9c-b549-62d53adef67d', 'PAK-24-402A', 'Arinac Forte', 3, 11.5, 0, 0, 34.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('3fe14ded-e669-485f-861a-0785a32f3cfa', '167b4a5a-5a47-40ce-bfc9-933231f3f79e', 'f3b21ee3-aea0-4752-80be-4e8f529ba682', '57beb8e5-a3ec-42b8-a996-5ce77082f28d', 'PAK-25-301B', 'Risek 20mg Capsule', 1, 22, 0, 0, 22, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('496c6449-d008-4fe9-8d72-9d34dc11becb', '9d1c1ebe-74f2-4469-a5b7-07cddb0fedd1', '54a54f7c-a102-44e7-b541-cfb3bf3ef17f', '6d92af15-d395-40b7-9442-d5d8f198f2c1', 'PAK-24-502A', 'CAC-1000 Plus Orange', 3, 34.5, 18, 18.63, 103.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('e51a19ef-99a4-4983-b924-c34681a29971', '9d1c1ebe-74f2-4469-a5b7-07cddb0fedd1', '5addfc11-19d2-4ada-985a-9461764f5612', '8ead7d59-d987-47e2-97d9-57cb71c9118a', 'PAK-25-201B', 'Augmentin 625mg', 2, 42.5, 0, 0, 85, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('bac17533-8854-4030-9302-0630994729df', 'b7d8f368-41dd-41a5-839d-c4426a7f47c2', '54a54f7c-a102-44e7-b541-cfb3bf3ef17f', '6d92af15-d395-40b7-9442-d5d8f198f2c1', 'PAK-24-502A', 'CAC-1000 Plus Orange', 2, 34.5, 18, 12.42, 69, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('a63e2c7d-7061-4b6a-8f65-ca59ba7aa890', '0adc3748-f6c6-41e6-aacc-3a8292313d7e', 'f3b21ee3-aea0-4752-80be-4e8f529ba682', '57beb8e5-a3ec-42b8-a996-5ce77082f28d', 'PAK-25-301B', 'Risek 20mg Capsule', 3, 22, 0, 0, 66, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('ecc1fa7c-1012-43d2-b73f-42a9373458b5', '0adc3748-f6c6-41e6-aacc-3a8292313d7e', 'fae24151-23b6-4fca-b37d-8d1a552ddfba', 'd2691818-0267-4c9e-837e-d01f40d695b2', 'PAK-24-701A', 'Glucophage 500mg', 2, 4.8, 0, 0, 9.6, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('3bf70db4-fc29-44a0-b3e1-9ca73eee3f06', '0adc3748-f6c6-41e6-aacc-3a8292313d7e', 'd725ea92-33bc-4d1a-a05a-85941475d52c', 'a1c811d6-9037-4234-b11b-b20d1e77f4f2', 'PAK-25-302B', 'Risek 40mg Capsule', 1, 37, 0, 0, 37, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('522d9a8c-bba6-43e2-b8e7-dfbc3cfbaa06', 'f061c010-2b21-4d26-95df-38d2a82a980d', '5a9b46f5-bdfb-4c5b-8709-29d244a6fc97', '28281302-0753-4bd4-8b1e-98212a474ad6', 'PAK-25-303B', 'Gaviscon Liquid Mint (120ml)', 2, 235, 0, 0, 470, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('9ab80ddf-6c38-43a8-94fb-70fa155e6ab7', '32fdd72d-0c5d-4ba0-8d01-362f670aee75', '997fd06a-a257-467b-9b00-1fc211221295', '3509ff0d-868a-4eb7-b21c-9ba19a6c1c29', 'PAK-24-401A', 'Brufen 400mg', 3, 5, 0, 0, 15, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('03ee7068-f751-4450-b5c3-5a46f88088f9', '32fdd72d-0c5d-4ba0-8d01-362f670aee75', 'e984e3bc-f371-406c-aa0b-431406df60d4', '61deb2f9-01c2-4f14-847e-e180f8a20604', 'PAK-24-101A', 'Panadol 500mg', 3, 3.5, 0, 0, 10.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('99ab0b54-eb7f-438e-a7c3-39f3d1c557a3', 'b04a35b1-b8c7-4657-9930-d3202eb1150f', 'c01adbcf-11ef-4ed5-a9ce-9f0a0ee5d8cf', '84f95160-32e3-4bcd-9a60-14953d563e70', 'PAK-25-801B', 'Lipget 20mg', 3, 30, 0, 0, 90, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('75e1e910-1d3c-4351-90ba-72d5ccc14aef', '538bce37-b8ae-46a5-b73a-987791d8e0c8', '5addfc11-19d2-4ada-985a-9461764f5612', '55789bba-5fd3-48e1-ade4-c1db733a01ec', 'PAK-24-201A', 'Augmentin 625mg', 1, 42.5, 0, 0, 42.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('aa55171a-9700-4b80-9714-145d126a2a75', '538bce37-b8ae-46a5-b73a-987791d8e0c8', 'e984e3bc-f371-406c-aa0b-431406df60d4', '61deb2f9-01c2-4f14-847e-e180f8a20604', 'PAK-24-101A', 'Panadol 500mg', 1, 3.5, 0, 0, 3.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('b3977d88-7d5a-4a59-869d-4b725391f5f3', '538bce37-b8ae-46a5-b73a-987791d8e0c8', '63ebbec1-f73a-4391-a1da-6a70a1edf687', '0d57610a-d22b-468e-a11a-c4591fb29abf', 'PAK-25-203B', 'Cefspan 400mg', 1, 85, 0, 0, 85, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('ac85998e-23f6-4448-ae0a-b87117533306', 'c7cc6289-109c-4d7a-b064-b6c4aba98175', '7acc0787-f72f-4650-8e31-30356325f7c1', 'dae7e711-a4bb-40b3-b2a8-f93445791a9d', 'PAK-24-802A', 'Concor 5mg', 2, 24.5, 0, 0, 49, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('0752b983-8c47-4ee4-b6c9-743582c9eeb0', 'c7cc6289-109c-4d7a-b064-b6c4aba98175', '63ebbec1-f73a-4391-a1da-6a70a1edf687', '403d425e-2346-4e6a-bba9-7873566292f4', 'PAK-24-203A', 'Cefspan 400mg', 1, 85, 0, 0, 85, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('af52a494-4e53-4b0c-92d0-98e3e0e5a02a', 'b9585c1e-e30a-4feb-8bea-0ef0f2f860ae', '7acc0787-f72f-4650-8e31-30356325f7c1', 'dae7e711-a4bb-40b3-b2a8-f93445791a9d', 'PAK-24-802A', 'Concor 5mg', 2, 24.5, 0, 0, 49, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('ea4d5ca9-54ee-45c1-9d17-6cad4b20d315', 'b9585c1e-e30a-4feb-8bea-0ef0f2f860ae', '997fd06a-a257-467b-9b00-1fc211221295', '3509ff0d-868a-4eb7-b21c-9ba19a6c1c29', 'PAK-24-401A', 'Brufen 400mg', 2, 5, 0, 0, 10, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('fdd69ded-ad1b-46d8-bad6-a42fb305dc5f', 'b9585c1e-e30a-4feb-8bea-0ef0f2f860ae', 'cf8f75e8-e74a-4920-8097-154f2732043b', '5a56d340-8d2b-462e-ba1b-0f57f449af6a', 'PAK-25-601B', 'Hydryllin Cough Syrup (120ml)', 1, 145, 0, 0, 145, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('79289e5f-9274-4283-be36-761b4c07aadc', 'a54b75b2-200f-498e-8cab-55e4198a390d', 'd6c2ef8d-e7ec-4baa-854b-db8ea576b122', '8f9fef63-c9da-46ed-8794-cbdc0f6dfdf7', 'PAK-25-202B', 'Augmentin 1g (1000mg)', 1, 68, 0, 0, 68, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('bd895abf-d079-44c5-a5ac-9305cb74511d', 'a54b75b2-200f-498e-8cab-55e4198a390d', '77b6e44f-26b7-41b0-9b59-ef68c5a16ff4', 'f224ac1e-5383-4900-9def-6bf00feca2f8', 'PAK-25-702B', 'Amaryl 2mg', 3, 19.5, 0, 0, 58.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('c826dc35-b52a-4335-914e-9e5d2f73b0ee', 'a54b75b2-200f-498e-8cab-55e4198a390d', 'f3b21ee3-aea0-4752-80be-4e8f529ba682', '57beb8e5-a3ec-42b8-a996-5ce77082f28d', 'PAK-25-301B', 'Risek 20mg Capsule', 1, 22, 0, 0, 22, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('73902006-6233-45a6-bcb7-b874fa944f7a', 'd4babf0e-2804-44be-a397-501e3e3a6123', 'd6c2ef8d-e7ec-4baa-854b-db8ea576b122', '8f9fef63-c9da-46ed-8794-cbdc0f6dfdf7', 'PAK-25-202B', 'Augmentin 1g (1000mg)', 1, 68, 0, 0, 68, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('d34d522d-74e2-40b8-8145-00a0277a6793', 'd4babf0e-2804-44be-a397-501e3e3a6123', '6de17988-d729-4de5-b8f2-7fd49011010f', 'fc437e8b-9dad-4a45-bfc5-02f8c7a2c055', 'PAK-25-103B', 'Panadol CF (Cold & Flu)', 1, 6, 0, 0, 6, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('75c5d439-d420-4f1a-8493-eb41af34d1d3', '93fb9a65-8d1d-40fa-be72-027c6767ff47', '77b6e44f-26b7-41b0-9b59-ef68c5a16ff4', 'f2e89304-f016-4c7c-b6b4-378f0e3c3b48', 'PAK-24-702A', 'Amaryl 2mg', 1, 19.5, 0, 0, 19.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('8b3c3a61-e744-449e-8438-d509b06b9b09', '93fb9a65-8d1d-40fa-be72-027c6767ff47', 'fae24151-23b6-4fca-b37d-8d1a552ddfba', 'd2691818-0267-4c9e-837e-d01f40d695b2', 'PAK-24-701A', 'Glucophage 500mg', 3, 4.8, 0, 0, 14.4, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('980beb0c-3272-46b2-b20f-115c2d216c98', 'e92e82d5-2d1c-4d81-8f1c-7f6505a0022a', '77b6e44f-26b7-41b0-9b59-ef68c5a16ff4', 'f224ac1e-5383-4900-9def-6bf00feca2f8', 'PAK-25-702B', 'Amaryl 2mg', 3, 19.5, 0, 0, 58.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('ccff3bea-7b44-41fd-8047-929ff76806ec', 'e92e82d5-2d1c-4d81-8f1c-7f6505a0022a', '997fd06a-a257-467b-9b00-1fc211221295', '3509ff0d-868a-4eb7-b21c-9ba19a6c1c29', 'PAK-24-401A', 'Brufen 400mg', 3, 5, 0, 0, 15, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('d14e53e3-5418-43a4-82ed-db6014bdb614', 'e92e82d5-2d1c-4d81-8f1c-7f6505a0022a', 'c01adbcf-11ef-4ed5-a9ce-9f0a0ee5d8cf', 'b821a191-3180-43d9-98ce-d8d9d05d6626', 'PAK-24-801A', 'Lipget 20mg', 3, 30, 0, 0, 90, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('e44d6dc2-8be7-4345-a171-9482ae22d706', '6cbba39a-abba-4dcf-bc73-dcca57607c7c', 'fae24151-23b6-4fca-b37d-8d1a552ddfba', 'd2691818-0267-4c9e-837e-d01f40d695b2', 'PAK-24-701A', 'Glucophage 500mg', 1, 4.8, 0, 0, 4.8, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('c8c324af-9018-488f-a30d-6983565e93bc', '6cbba39a-abba-4dcf-bc73-dcca57607c7c', '04109426-f514-41a6-bfd8-b5ce118e1fb8', '4ad9c9f1-8f9c-447a-8425-0d282d80f8c7', 'PAK-24-001A', 'Flagyl 400mg', 1, 5.8, 0, 0, 5.8, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('fef904ad-a5ac-45ff-82df-d8848d0d3e6e', 'd37843c5-b667-474c-84b4-182c98cc2039', '56b8e8a1-24f1-4f75-9276-81fe46eb1872', 'cad99c9a-d5ee-488b-bcdf-4fdcb1d4ef0a', 'PAK-24-101A', 'Pyodine Solution 10% (60ml)', 2, 110, 5, 11, 220, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('716bbd40-b648-465f-b4f3-5b44c1872d42', 'd37843c5-b667-474c-84b4-182c98cc2039', 'd37eb3c0-dfc6-454a-b8d8-6709ce9d3b00', '3329325e-e0ec-409d-9d55-012bc2ba7a21', 'PAK-24-902A', 'Softin 10mg', 3, 12.5, 0, 0, 37.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('4132d9d4-6801-4a8d-b4ee-48ab0da6098d', 'd37843c5-b667-474c-84b4-182c98cc2039', 'e984e3bc-f371-406c-aa0b-431406df60d4', '7152ebfa-8322-4915-90f7-ccb552bd97eb', 'PAK-25-101B', 'Panadol 500mg', 2, 3.5, 0, 0, 7, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('2a0706bf-9aa0-4462-87a9-0e54812c42cc', '8d262ce8-cc4b-4b2b-a83b-dc1be4a2dabc', 'd725ea92-33bc-4d1a-a05a-85941475d52c', '653b3e92-dc2d-48e6-9232-06546ab67c48', 'PAK-24-302A', 'Risek 40mg Capsule', 1, 37, 0, 0, 37, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('f2aa6b51-4226-497b-a498-4d237d141bc3', '8d262ce8-cc4b-4b2b-a83b-dc1be4a2dabc', '997fd06a-a257-467b-9b00-1fc211221295', '3509ff0d-868a-4eb7-b21c-9ba19a6c1c29', 'PAK-24-401A', 'Brufen 400mg', 1, 5, 0, 0, 5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('34b73991-5602-4e4e-b17d-7a6dd45aa2f8', '023bb622-9c23-47f2-8e26-b8ed18729f88', '997fd06a-a257-467b-9b00-1fc211221295', '3509ff0d-868a-4eb7-b21c-9ba19a6c1c29', 'PAK-24-401A', 'Brufen 400mg', 1, 5, 0, 0, 5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('12db5441-383f-44ae-a165-7a3d2d91d89c', 'edb4070b-0726-431f-990b-b2b894dbd09f', 'e5c7d048-8a5f-4fb8-b79b-9670d75023fa', '383858c1-18b0-4816-a933-7b7af0501d02', 'PAK-24-102A', 'Panadol Extra', 1, 4.2, 0, 0, 4.2, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('7745eef0-d21d-4fc6-bfb2-c14e18ae3ee7', 'a13701e3-2324-4f2c-813e-90418d05ad07', '5addfc11-19d2-4ada-985a-9461764f5612', '55789bba-5fd3-48e1-ade4-c1db733a01ec', 'PAK-24-201A', 'Augmentin 625mg', 1, 42.5, 0, 0, 42.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('a7ffbf69-e8ed-444c-9f85-51917a771ce6', 'a9852279-8d63-45fb-b888-b44ff0df91de', '6de17988-d729-4de5-b8f2-7fd49011010f', 'df664f34-9bdd-4f63-aace-7c669ee2454e', 'PAK-24-103A', 'Panadol CF (Cold & Flu)', 1, 6, 0, 0, 6, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('bba82e96-f51c-4c9c-94e4-fdf80e2cbb7e', 'a9852279-8d63-45fb-b888-b44ff0df91de', '5addfc11-19d2-4ada-985a-9461764f5612', '55789bba-5fd3-48e1-ade4-c1db733a01ec', 'PAK-24-201A', 'Augmentin 625mg', 1, 42.5, 0, 0, 42.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('8e35b30e-522a-4577-8278-ab5a380e6ee8', '6203f24f-07cf-4285-859e-4b4f1b068f85', '5addfc11-19d2-4ada-985a-9461764f5612', '55789bba-5fd3-48e1-ade4-c1db733a01ec', 'PAK-24-201A', 'Augmentin 625mg', 1, 42.5, 0, 0, 42.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('e22e7f8f-3c37-478c-92d5-11c746f1aaa3', '6203f24f-07cf-4285-859e-4b4f1b068f85', '6de17988-d729-4de5-b8f2-7fd49011010f', 'df664f34-9bdd-4f63-aace-7c669ee2454e', 'PAK-24-103A', 'Panadol CF (Cold & Flu)', 1, 6, 0, 0, 6, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('470be662-8ba8-43f9-9547-bdaa9562c52a', '6203f24f-07cf-4285-859e-4b4f1b068f85', 'e5c7d048-8a5f-4fb8-b79b-9670d75023fa', '383858c1-18b0-4816-a933-7b7af0501d02', 'PAK-24-102A', 'Panadol Extra', 1, 4.2, 0, 0, 4.2, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.sale_items (id, sale_id, medicine_id, batch_id, batch_number, name, quantity, price_at_sale, tax_rate_at_sale, tax_amount, subtotal_item, branch_id, pharmacy_id) VALUES ('9e9b4237-2b49-438b-940d-e5fbeac794cc', '6203f24f-07cf-4285-859e-4b4f1b068f85', 'e984e3bc-f371-406c-aa0b-431406df60d4', '61deb2f9-01c2-4f14-847e-e180f8a20604', 'PAK-24-101A', 'Panadol 500mg', 1, 3.5, 0, 0, 3.5, 'aa5f5120-0b9e-4831-8cad-528b5a5095b6', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.activity_logs (3 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.activity_logs (id, user_id, username, action, target_table, target_record_id, details, device_name, branch_id, created_at, pharmacy_id) VALUES ('08a055c9-158c-40d1-81ae-45a31ed72542', '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'admin', 'login_success', NULL, NULL, '{"device":"DESKTOP-O40B1J4"}'::JSONB, 'DESKTOP-O40B1J4', NULL, '2026-08-20T20:01:49.373451+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.activity_logs (id, user_id, username, action, target_table, target_record_id, details, device_name, branch_id, created_at, pharmacy_id) VALUES ('bad713dc-5cc4-4e8b-b754-7f527675185b', '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'admin', 'login_success', NULL, NULL, '{"device":"DESKTOP-O40B1J4"}'::JSONB, 'DESKTOP-O40B1J4', NULL, '2026-08-20T20:04:57.394387+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.activity_logs (id, user_id, username, action, target_table, target_record_id, details, device_name, branch_id, created_at, pharmacy_id) VALUES ('594486e3-46d8-4dd7-8333-220ef5ff26dc', '8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'admin', 'login_success', NULL, NULL, '{"device":"DESKTOP-O40B1J4"}'::JSONB, 'DESKTOP-O40B1J4', NULL, '2026-08-20T20:17:43.035017+00:00', '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.settings (3 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.settings (key, value, branch_id, pharmacy_id) VALUES ('refund_approval_threshold', '5000', NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+INSERT INTO public.settings (key, value, branch_id, pharmacy_id) VALUES ('default_tax_rate', '0', NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+INSERT INTO public.settings (key, value, branch_id, pharmacy_id) VALUES ('expiry_threshold_days', '30', NULL, '11111111-1111-1111-1111-111111111111') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
+-- ------------------------------------------------------------------------------
+-- Table: public.app_users (1 records)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.app_users (id, username, display_name, role, branch_id, created_at, can_view_all_branches, pharmacy_id) VALUES ('8f6aa64f-192e-4fd7-acc6-8584ce383a40', 'admin', 'Administrator', 'admin', NULL, '2026-08-20T20:00:22.692781+00:00', FALSE, '11111111-1111-1111-1111-111111111111') ON CONFLICT (id) DO NOTHING;
+
+-- Re-enable standard trigger/constraint enforcement
+SET session_replication_role = 'DEFAULT';
+
+COMMIT;
