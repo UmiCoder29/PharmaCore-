@@ -58,7 +58,7 @@ The code runs with no console errors.
 The change was tested by hand and the steps are written out.
 No secrets, no default passwords, no hardcoded project URLs.
 Security rules in section 3 still hold.
-Nothing outside the prompt's scope changed ,
+Nothing outside the prompt's scope changed.
 
 - Migration files are named YYYYMMDDNNNNNN_description.sql (timestamp, then a sequence number) and run in order.
 - A migration that has been applied to any database is never edited. Any fix is a new migration file.

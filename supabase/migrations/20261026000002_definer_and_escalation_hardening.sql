@@ -3,7 +3,7 @@
 -- 1. Protect app_users from privilege and tenant escalation (trigger fn_protect_app_users_escalation).
 -- 2. Protect pharmacies from billing, quota escalation, and id mutation (trigger fn_protect_pharmacy_billing).
 -- 3. Lock returns with FOR UPDATE during approve_return and enforce pharmacy tenant isolation.
--- 4. Harden process_sale and process_return to require user pharmacy assignment and remove all NULL-pharmacy fallbacks.
+-- 4. Harden process_sale and process_return to require user pharmacy assignment, remove all NULL-pharmacy fallbacks, and verify batch/medicine ownership per item.
 -- 5. Restrict direct INSERT on sales, sale_items, sale_payments, returns, and return_items to superadmins only.
 --
 -- Rollback instructions:
@@ -30,11 +30,10 @@
 CREATE OR REPLACE FUNCTION public.fn_protect_app_users_escalation()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- Allow direct SQL (migration scripts/psql), service role, postgres, and superadmins
+    -- Allow direct SQL (migration scripts/psql), service role, and superadmins
     IF auth.uid() IS NULL 
        OR public.is_superadmin() 
-       OR auth.role() = 'service_role' 
-       OR current_user = 'postgres' THEN
+       OR auth.role() = 'service_role' THEN
         RETURN NEW;
     END IF;
 
@@ -46,6 +45,9 @@ BEGIN
             RAISE EXCEPTION 'Cannot create user for another pharmacy';
         END IF;
     ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.id IS DISTINCT FROM OLD.id THEN
+            RAISE EXCEPTION 'Cannot modify user ID';
+        END IF;
         IF NEW.role IS DISTINCT FROM OLD.role THEN
             RAISE EXCEPTION 'Only superadmin can change user roles';
         END IF;
@@ -69,7 +71,7 @@ DROP POLICY IF EXISTS "admin_write_app_users" ON public.app_users;
 CREATE POLICY "admin_write_app_users" ON public.app_users 
     FOR ALL TO authenticated 
     USING (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()))
-    WITH CHECK (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin()));
+    WITH CHECK (public.is_superadmin() OR (pharmacy_id = public.get_user_pharmacy_id() AND public.is_admin() AND role <> 'superadmin'));
 
 -- ==============================================================================
 -- 2. PHARMACIES BILLING, LIMITS & ID PROTECTION TRIGGER
@@ -78,11 +80,10 @@ CREATE POLICY "admin_write_app_users" ON public.app_users
 CREATE OR REPLACE FUNCTION public.fn_protect_pharmacy_billing()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- Allow direct SQL (migration scripts/psql), service role, postgres, and superadmins
+    -- Allow direct SQL (migration scripts/psql), service role, and superadmins
     IF auth.uid() IS NULL 
        OR public.is_superadmin() 
-       OR auth.role() = 'service_role' 
-       OR current_user = 'postgres' THEN
+       OR auth.role() = 'service_role' THEN
         RETURN NEW;
     END IF;
 
@@ -208,12 +209,13 @@ DECLARE
     v_pharmacy_id UUID;
     v_branch_id UUID;
     v_item JSONB;
+    v_verified_med RECORD;
     v_sale_item_id UUID;
     v_payment JSONB;
     v_invoice_number TEXT;
     v_customer_id UUID;
     v_prescription_id UUID;
-    v_needs_prescription BOOLEAN;
+    v_needs_prescription BOOLEAN := FALSE;
     v_payment_total NUMERIC;
     v_sub_status TEXT;
     v_sub_ends TIMESTAMPTZ;
@@ -268,14 +270,53 @@ BEGIN
         RAISE EXCEPTION 'Customer does not belong to user pharmacy';
     END IF;
 
-    -- Controlled substances & prescription drug check
-    SELECT EXISTS (
-        SELECT 1 FROM jsonb_array_elements(p_items) i
-        JOIN public.medicines m ON m.id = (i->>'medicine_id')::UUID
-        WHERE m.pharmacy_id = v_pharmacy_id 
-          AND (m.prescription_required OR m.controlled_schedule IS NOT NULL)
-    ) INTO v_needs_prescription;
+    IF p_items IS NULL OR jsonb_array_length(p_items) = 0 THEN
+        RAISE EXCEPTION 'Sale must contain at least one item';
+    END IF;
 
+    -- Per-item verification: batch ownership, medicine ownership, active status, and prescription requirement
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_items)
+    LOOP
+        SELECT 
+            b.id AS batch_id,
+            b.batch_number,
+            b.quantity_in_stock,
+            m.id AS medicine_id,
+            m.name AS medicine_name,
+            m.prescription_required,
+            m.controlled_schedule
+        INTO v_verified_med
+        FROM public.batches b
+        JOIN public.medicines m ON m.id = b.medicine_id
+        WHERE b.id = (v_item->>'batch_id')::UUID
+          AND b.medicine_id = (v_item->>'medicine_id')::UUID
+          AND b.pharmacy_id = v_pharmacy_id
+          AND m.pharmacy_id = v_pharmacy_id
+          AND m.is_active = TRUE
+          AND m.deleted_at IS NULL;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Item validation failed: batch % does not match active medicine % in user pharmacy',
+                COALESCE(v_item->>'batch_number', v_item->>'batch_id'),
+                COALESCE(v_item->>'name', v_item->>'medicine_id');
+        END IF;
+
+        IF (v_item->>'quantity')::INTEGER <= 0 THEN
+            RAISE EXCEPTION 'Quantity must be greater than zero for %', v_verified_med.medicine_name;
+        END IF;
+
+        IF v_verified_med.quantity_in_stock < (v_item->>'quantity')::INTEGER THEN
+            RAISE EXCEPTION 'Insufficient stock for batch % (available: %, requested: %)',
+                v_verified_med.batch_number, v_verified_med.quantity_in_stock, (v_item->>'quantity')::INTEGER;
+        END IF;
+
+        -- Decide prescription requirement from verified medicine row
+        IF v_verified_med.prescription_required OR v_verified_med.controlled_schedule IS NOT NULL THEN
+            v_needs_prescription := TRUE;
+        END IF;
+    END LOOP;
+
+    -- Prescription enforcement if any verified item requires prescription or is controlled
     IF v_needs_prescription AND (v_customer_id IS NULL OR v_prescription_id IS NULL) THEN
         RAISE EXCEPTION 'A verified prescription and customer are required for prescription or controlled medicines';
     END IF;
@@ -320,11 +361,12 @@ BEGIN
         UPDATE public.batches 
         SET quantity_in_stock = quantity_in_stock - (v_item->>'quantity')::INTEGER
         WHERE id = (v_item->>'batch_id')::UUID 
+          AND medicine_id = (v_item->>'medicine_id')::UUID
           AND pharmacy_id = v_pharmacy_id
           AND quantity_in_stock >= (v_item->>'quantity')::INTEGER;
 
         IF NOT FOUND THEN 
-            RAISE EXCEPTION 'Insufficient stock for batch %', v_item->>'batch_number'; 
+            RAISE EXCEPTION 'Concurrent update: Insufficient stock for batch %', v_item->>'batch_number'; 
         END IF;
 
         v_sale_item_id := gen_random_uuid();
