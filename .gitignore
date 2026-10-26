@@ -62,6 +62,7 @@ users-feature-test-data/
 branch-feature-test-data/
 cloud-integration-test-data/
 scratch/
+archive/
 
 # ─── Logs & Temp Files ────────────────────────────────────────────────────────
 *.log
