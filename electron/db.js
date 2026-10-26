@@ -1,4 +1,4 @@
-import { getSupabaseClient, getAdminClient, isOnline } from './supabaseClient.js';
+import { getSupabaseClient, isOnline } from './supabaseClient.js';
 import { setCacheData, getCacheData } from './localCache.js';
 import { enqueueOfflineWrite, getQueueCount } from './offlineQueue.js';
 import { getCurrentUser } from './auth.js';
@@ -488,82 +488,22 @@ export async function processSaleAtomic(saleData) {
     }
 
     const supabase = getSupabaseClient();
-    const adminClient = getAdminClient();
-    const dbClient = adminClient || supabase;
-
-    // 1. Resolve branch ID reliably
-    let branchId = currentUser?.branchId || null;
-    if (!branchId && currentUser?.id) {
-      const { data: uRow } = await dbClient.from('app_users').select('branch_id').eq('id', currentUser.id).single();
-      branchId = uRow?.branch_id || null;
-    }
-    if (!branchId && pharmacyId) {
-      const { data: bRow } = await dbClient.from('branches').select('id').eq('pharmacy_id', pharmacyId).order('created_at', { ascending: true }).limit(1).maybeSingle();
-      branchId = bRow?.id || null;
-    }
-
-    // 2. Insert parent sale record
-    const { error: saleErr } = await dbClient.from('sales').insert({
-      id: p_sale_id,
-      pharmacy_id: pharmacyId,
-      date_time: new Date().toISOString(),
-      subtotal: p_subtotal,
-      total_tax: p_total_tax,
-      total_amount: p_total_amount,
-      cashier_user_id: currentUser?.id || null,
-      branch_id: branchId,
-      customer_id: saleData.customerId || null,
-      prescription_id: saleData.prescriptionId || null,
-      payment_method: p_metadata.payment_method,
-      discount_amount: p_metadata.discount_amount,
-      cash_received: p_metadata.cash_received,
-      change_amount: p_metadata.change_amount,
-      notes: p_metadata.notes
+    const { data: saleIdResult, error: rpcErr } = await supabase.rpc('process_sale', {
+      p_sale_id,
+      p_items,
+      p_subtotal,
+      p_total_tax,
+      p_total_amount,
+      p_metadata
     });
-    if (saleErr) {
-      console.error('[DB] Failed to insert parent sale:', saleErr);
-      throw new Error(`Failed to create sale: ${saleErr.message || JSON.stringify(saleErr)}`);
+
+    if (rpcErr) {
+      console.error('[DB] Failed in process_sale RPC:', rpcErr);
+      throw new Error(`Failed to process sale: ${rpcErr.message || JSON.stringify(rpcErr)}`);
     }
 
-    // 3. Batch insert all sale items
-    if (p_items.length > 0) {
-      const saleItemRows = p_items.map(item => ({
-        id: crypto.randomUUID(),
-        pharmacy_id: pharmacyId,
-        sale_id: p_sale_id,
-        medicine_id: item.medicine_id,
-        batch_id: item.batch_id,
-        batch_number: item.batch_number,
-        name: item.name,
-        quantity: item.quantity,
-        price_at_sale: item.price_at_sale,
-        tax_rate_at_sale: item.tax_rate_at_sale,
-        tax_amount: item.tax_amount,
-        subtotal_item: item.subtotal_item,
-        branch_id: branchId
-      }));
-
-      const { error: itemsErr } = await dbClient.from('sale_items').insert(saleItemRows);
-      if (itemsErr) {
-        console.error('[DB] Failed to insert sale items, rolling back sale:', itemsErr);
-        await dbClient.from('sales').delete().eq('id', p_sale_id);
-        throw new Error(`Failed to save sale items: ${itemsErr.message || JSON.stringify(itemsErr)}`);
-      }
-
-      // 4. Update batch stock for each sold item
-      for (const item of p_items) {
-        if (item.batch_id) {
-          const { data: bRow } = await dbClient.from('batches').select('quantity_in_stock').eq('id', item.batch_id).single();
-          if (bRow) {
-            const newStock = Math.max(0, (bRow.quantity_in_stock || 0) - item.quantity);
-            await dbClient.from('batches').update({ quantity_in_stock: newStock }).eq('id', item.batch_id);
-          }
-        }
-      }
-    }
-    
     return {
-      id: p_sale_id,
+      id: saleIdResult || p_sale_id,
       dateTime: new Date().toISOString(),
       subtotal: p_subtotal,
       totalTax: p_total_tax,
