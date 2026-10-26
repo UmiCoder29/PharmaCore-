@@ -37,8 +37,6 @@
 -- DROP FUNCTION IF EXISTS public.is_superadmin() CASCADE;
 -- ==============================================================================
 
-BEGIN;
-
 -- ------------------------------------------------------------------------------
 -- 1. EXTENSIONS
 -- ------------------------------------------------------------------------------
@@ -1095,5 +1093,3 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON ROUTINES TO authenticated
 
 -- Reload Supabase PostgREST schema cache
 NOTIFY pgrst, 'reload schema';
-
-COMMIT;
