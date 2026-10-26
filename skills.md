@@ -58,4 +58,9 @@ The code runs with no console errors.
 The change was tested by hand and the steps are written out.
 No secrets, no default passwords, no hardcoded project URLs.
 Security rules in section 3 still hold.
-Nothing outside the prompt's scope changed.
+Nothing outside the prompt's scope changed ,
+
+- Migration files are named YYYYMMDDNNNNNN_description.sql (timestamp, then a sequence number) and run in order.
+- A migration that has been applied to any database is never edited. Any fix is a new migration file.
+- Migrations run in the Supabase SQL Editor as the postgres role. Never alter default privileges for supabase_admin or other Supabase-managed roles, and never modify the auth, storage or realtime schemas.
+- A row-level policy for the anon role must not call helper functions that anon cannot execute. Write separate anon and authenticated policies.
