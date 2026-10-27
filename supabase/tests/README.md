@@ -8,17 +8,18 @@ This directory contains the automated Row Level Security (RLS) and tenant isolat
 
 The test suite is implemented in [rls_suite.sql](rls_suite.sql).
 
-- **Standalone Helper Functions (`pg_temp`)**: Before the main execution block, helper runners (`pg_temp.run_statement` and `pg_temp.run_script`) and the logger procedure (`pg_temp.log_result`) are defined in session-scoped temporary schema `pg_temp`.
-- **Session Results Temp Table**: Test outcomes are stored in `pg_temp.suite_results`, inserted under the `postgres` role after `RESET ROLE`.
+- **Standalone Helper Functions (`pg_temp`)**: Before the main execution block, runner helpers (`pg_temp.run_statement`, `pg_temp.run_script`), expected access lookup (`pg_temp.get_expected_access`), and the logger procedure (`pg_temp.log_result`) are defined in session-scoped temporary schema `pg_temp`.
+- **Session Results Temp Table**: Test outcomes are stored in `pg_temp.suite_results` (`err_state TEXT`, `actual TEXT`, `status TEXT`, etc.), inserted under the `postgres` role after `RESET ROLE`.
 - **Zero-Persistence Atomic Rollback**: The suite creates test fixtures (pharmacies, branches, auth/app users, medicines, batches, sales, etc.) and tests operations in a single script batch. At completion, it raises an intentional exception carrying the audit report:
   ```sql
   RAISE EXCEPTION E'\n%', v_report;
   ```
   PostgreSQL automatically rolls back the transaction. Zero test records or test accounts persist in the database.
 - **Sub-Transaction Test Isolation**: Statements execute in an inner sub-block that always triggers a sentinel rollback exception (`__TEST_SENTINEL_ROLLBACK__`), preventing test side-effects from polluting subsequent assertions.
-- **Strict Block Verification (No False Passes)**: Only PostgreSQL error `42501` (`insufficient_privilege`) or `ROW_COUNT = 0` (RLS filter) classifies as a security `BLOCKED`. Triggers and functions raise custom exceptions (SQLSTATE `P0001`); if the test supplies an expected error substring and it matches, it counts as `BLOCKED`. Any unexpected error (e.g. `23502`, `23503`) is classified as `TEST_ERROR` (failure).
+- **Strict Block Verification (No False Passes)**: Only PostgreSQL error `42501` (`insufficient_privilege`) or `ROW_COUNT = 0` (RLS filter) classifies as security `BLOCKED`. Triggers and functions raise custom exceptions (SQLSTATE `P0001`); if the test supplies an expected error substring and it matches, it counts as `BLOCKED`. Any unexpected error (e.g. `23502`, `23503`) is classified as `TEST_ERROR` (failure).
 - **Multi-Step Runner (`pg_temp.run_script`)**: Executes an array of statements sequentially within a single rolled-back sub-transaction under a simulated user, optionally running a scalar `check_sql` validation query as `postgres` before rollback.
-- **Table-Driven 152-Cell Matrix**: Generates cross-tenant assertions across all 19 public tables x 4 operations (SELECT, INSERT, UPDATE, DELETE) x 2 actors (`admin_a`, `pharmacist_a`).
+- **Table-Driven 152-Cell Cross-Tenant Matrix**: Generates cross-tenant assertions across all 19 public tables x 4 operations (SELECT, INSERT, UPDATE, DELETE) x 2 actors (`admin_a`, `pharmacist_a`). Authenticated users can read `platform_settings` keys by design (they hold no secrets); all other operations against pharmacy B are expected `BLOCKED`.
+- **Table-Driven 152-Cell Positive Controls**: Runs the same statement shapes against Pharmacy A (own pharmacy and own branch) asserting `ALLOWED` where policies allow and `BLOCKED` where they do not.
 - **Coverage Guard**: Queries `pg_temp.suite_results` to verify all 152 cells in the cross-tenant matrix were executed.
 - **Known Accepted Gaps Handling**: Tests covering known gaps expect the secure outcome (`BLOCKED`). If the insecure outcome occurs, the test is classified as `KNOWN` rather than `PASS`. If secured, it becomes `PASS`.
 
@@ -40,24 +41,23 @@ The test suite is implemented in [rls_suite.sql](rls_suite.sql).
 > The sample output below is an illustration of what the audit report looks like when executed in the Supabase SQL Editor.
 
 ```text
-SUITE_RESULT: FAIL (Total: 215, Passed: 210, Failed: 3, Known Gaps: 2)
+SUITE_RESULT: FAIL (Total: 381, Passed: 378, Failed: 1, Known Gaps: 2)
 ================================================================================
 PHARMACORE RLS & SECURITY TEST SUITE AUDIT REPORT
 ================================================================================
 
 SUMMARY COUNTS:
-  Total Tests Checked : 215
-  Passed              : 210
-  Failed              : 3
+  Total Tests Checked : 381
+  Passed              : 378
+  Failed              : 1
   Known Accepted Gaps : 2
 
 --------------------------------------------------------------------------------
-FAILED TESTS DETAILS (3 failure(s)):
+FAILED TESTS DETAILS (1 failure(s)):
 --------------------------------------------------------------------------------
   [FAIL] 11. Limits Enforcement -> admin cannot insert branch beyond max_branches
          Actor   : admin_a
          Details : MISMATCH: Expected BLOCKED but got ALLOWED
-  ...
 
 --------------------------------------------------------------------------------
 KNOWN ACCEPTED GAPS (Milestone 3 Scope):
@@ -94,8 +94,8 @@ platform_settings      | admin x . . . | pharm x . . .
 --------------------------------------------------------------------------------
 CATEGORY SUMMARY BREAKDOWN:
 --------------------------------------------------------------------------------
-2. Cross-Tenant            | Total: 152 | Pass: 150 | Fail:  2 | Known:  0
-2. Positive Controls       | Total:  17 | Pass:  17 | Fail:  0 | Known:  0
+1. Cross-Tenant            | Total: 152 | Pass: 152 | Fail:  0 | Known:  0
+2. Positive Controls       | Total: 152 | Pass: 152 | Fail:  0 | Known:  0
 3. Coverage Guard          | Total:  20 | Pass:  20 | Fail:  0 | Known:  0
 4. Branch Isolation        | Total:   3 | Pass:   3 | Fail:  0 | Known:  0
 5. Role Rules              | Total:   5 | Pass:   5 | Fail:  0 | Known:  0
