@@ -50,8 +50,7 @@ POSsystem/
 │   │   ├── UsersScreen.jsx       # Staff administration, roles & password resets
 │   │   ├── SaasAdminScreen.jsx   # Global platform tenant management & quotas
 │   │   ├── SaasPlansScreen.jsx   # Subscription tiers & feature entitlements
-│   │   ├── SaasSettingsScreen.jsx# Platform configuration & custom database setup
-│   │   ├── CloudSyncScreen.jsx   # Sync engine status, queue inspector & latency monitor
+│   │   ├── SaasSettingsScreen.jsx# Platform configuration & settings
 │   │   └── TaxDashboard.jsx      # FBR tax compliance summaries & breakdown
 │   ├── contexts/                 # React context providers (AuthContext, NavigationContext)
 │   ├── index.css                 # Tailwind utility tokens & clinical design system
@@ -97,8 +96,6 @@ Populate the values in `.env`:
 ```ini
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
-SUPABASE_SECRET_KEY=sb_secret_...
-SUPABASE_JWKS_URL=https://your-project.supabase.co/auth/v1/.well-known/jwks.json
 NODE_ENV=development
 ```
 
