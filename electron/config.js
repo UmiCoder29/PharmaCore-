@@ -38,11 +38,13 @@ export function decodeJwtPayload(token) {
 
 /**
  * Validates a Supabase project URL.
- * Accepts https://<ref>.supabase.co or http://localhost / http://127.0.0.1 for local dev.
+ * Accepts https://<ref>.supabase.co or (when allowLocal is true) http://localhost / http://127.0.0.1.
+ * Rejects URLs with credentials, query strings, or hashes, and returns parsed.origin.
  * @param {string} url
- * @returns {string} Sanitized URL without trailing slash.
+ * @param {{ allowLocal?: boolean }} options
+ * @returns {string} Sanitized URL origin (protocol + host + port).
  */
-export function validateSupabaseUrl(url) {
+export function validateSupabaseUrl(url, { allowLocal = false } = {}) {
   if (!url || typeof url !== 'string' || !url.trim()) {
     throw new Error('Missing required configuration: SUPABASE_URL');
   }
@@ -55,11 +57,34 @@ export function validateSupabaseUrl(url) {
     throw new Error('Invalid SUPABASE_URL: must be a valid URL.');
   }
 
+  // Reject URLs containing credentials
+  if (parsed.username || parsed.password) {
+    throw new Error('Invalid SUPABASE_URL: URL must not contain credentials.');
+  }
+
+  // Reject URLs containing query string
+  if (parsed.search) {
+    throw new Error('Invalid SUPABASE_URL: URL must not contain a query string.');
+  }
+
+  // Reject URLs containing hash fragment
+  if (parsed.hash) {
+    throw new Error('Invalid SUPABASE_URL: URL must not contain a hash fragment.');
+  }
+
+  // Reject URLs containing subpaths
+  if (parsed.pathname && parsed.pathname !== '/') {
+    throw new Error('Invalid SUPABASE_URL: project URL must not contain subpaths.');
+  }
+
   const isLocalDev = (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') &&
                      (parsed.protocol === 'http:' || parsed.protocol === 'https:');
 
   if (isLocalDev) {
-    return trimmed.replace(/\/+$/, '');
+    if (!allowLocal) {
+      throw new Error('Invalid SUPABASE_URL: localhost is only allowed in unpackaged development mode.');
+    }
+    return parsed.origin;
   }
 
   if (parsed.protocol !== 'https:') {
@@ -68,14 +93,10 @@ export function validateSupabaseUrl(url) {
 
   const supabaseHostRegex = /^[a-z0-9_-]+\.supabase\.co$/i;
   if (!supabaseHostRegex.test(parsed.hostname)) {
-    throw new Error('Invalid SUPABASE_URL: host must match https://<ref>.supabase.co (or http://localhost / http://127.0.0.1 for local dev).');
+    throw new Error('Invalid SUPABASE_URL: host must match https://<ref>.supabase.co.');
   }
 
-  if (parsed.pathname && parsed.pathname !== '/') {
-    throw new Error('Invalid SUPABASE_URL: project URL must not contain subpaths.');
-  }
-
-  return trimmed.replace(/\/+$/, '');
+  return parsed.origin;
 }
 
 /**
@@ -126,11 +147,11 @@ export function validatePublishableKey(key) {
 
 /**
  * Validates both Supabase URL and Publishable Key.
- * @param {{ supabaseUrl?: string, supabasePublishableKey?: string }} param0
+ * @param {{ supabaseUrl?: string, supabasePublishableKey?: string, allowLocal?: boolean }} param0
  * @returns {{ supabaseUrl: string, supabasePublishableKey: string }}
  */
-export function validateSupabaseConfig({ supabaseUrl, supabasePublishableKey } = {}) {
-  const validUrl = validateSupabaseUrl(supabaseUrl);
+export function validateSupabaseConfig({ supabaseUrl, supabasePublishableKey, allowLocal = false } = {}) {
+  const validUrl = validateSupabaseUrl(supabaseUrl, { allowLocal });
   const validKey = validatePublishableKey(supabasePublishableKey);
   return {
     supabaseUrl: validUrl,
@@ -191,7 +212,8 @@ export function loadConfig({
 
   return validateSupabaseConfig({
     supabaseUrl: url,
-    supabasePublishableKey: key
+    supabasePublishableKey: key,
+    allowLocal: !isPackaged
   });
 }
 
@@ -203,18 +225,27 @@ let _cachedConfig = null;
  * @param {boolean} isPackaged
  * @returns {{ supabaseUrl: string, supabasePublishableKey: string }}
  */
-export function initAppConfig(isPackaged = false) {
-  _cachedConfig = loadConfig({ isPackaged });
+export function initAppConfig(isPackaged = false, options = {}) {
+  _cachedConfig = null;
+  _cachedConfig = loadConfig({ isPackaged, ...options });
   return _cachedConfig;
 }
 
 /**
  * Gets the active, validated configuration.
+ * Throws if initAppConfig has not successfully run.
  * @returns {{ supabaseUrl: string, supabasePublishableKey: string }}
  */
 export function getConfig() {
   if (!_cachedConfig) {
-    _cachedConfig = loadConfig({ isPackaged: false });
+    throw new Error('Configuration not initialized');
   }
   return _cachedConfig;
+}
+
+/**
+ * Resets cached configuration (primarily for testing).
+ */
+export function resetConfig() {
+  _cachedConfig = null;
 }

@@ -8,7 +8,10 @@ import {
   validateSupabaseUrl,
   validatePublishableKey,
   validateSupabaseConfig,
-  loadConfig
+  loadConfig,
+  initAppConfig,
+  getConfig,
+  resetConfig
 } from '../electron/config.js';
 
 // Helper to construct base64url JWTs
@@ -73,7 +76,22 @@ describe('Supabase Configuration Validator', () => {
       );
     });
 
-    it('accepts valid https://<ref>.supabase.co URLs', () => {
+    it('rejects URLs containing credentials, query strings, or hashes', () => {
+      assert.throws(
+        () => validateSupabaseUrl('https://user:password@project.supabase.co'),
+        /Invalid SUPABASE_URL: URL must not contain credentials/
+      );
+      assert.throws(
+        () => validateSupabaseUrl('https://project.supabase.co?token=secret'),
+        /Invalid SUPABASE_URL: URL must not contain a query string/
+      );
+      assert.throws(
+        () => validateSupabaseUrl('https://project.supabase.co#fragment'),
+        /Invalid SUPABASE_URL: URL must not contain a hash fragment/
+      );
+    });
+
+    it('accepts valid https://<ref>.supabase.co URLs and returns parsed.origin', () => {
       const url1 = validateSupabaseUrl('https://abcdefghijklm.supabase.co');
       assert.equal(url1, 'https://abcdefghijklm.supabase.co');
 
@@ -81,11 +99,22 @@ describe('Supabase Configuration Validator', () => {
       assert.equal(url2, 'https://xyz-123_proj.supabase.co');
     });
 
-    it('allows localhost and 127.0.0.1 for local dev', () => {
-      const url1 = validateSupabaseUrl('http://localhost:54321');
+    it('rejects localhost when allowLocal is false (default)', () => {
+      assert.throws(
+        () => validateSupabaseUrl('http://localhost:54321', { allowLocal: false }),
+        /Invalid SUPABASE_URL: localhost is only allowed in unpackaged development mode/
+      );
+      assert.throws(
+        () => validateSupabaseUrl('http://127.0.0.1:54321', { allowLocal: false }),
+        /Invalid SUPABASE_URL: localhost is only allowed in unpackaged development mode/
+      );
+    });
+
+    it('allows localhost and 127.0.0.1 when allowLocal is true', () => {
+      const url1 = validateSupabaseUrl('http://localhost:54321', { allowLocal: true });
       assert.equal(url1, 'http://localhost:54321');
 
-      const url2 = validateSupabaseUrl('http://127.0.0.1:54321/');
+      const url2 = validateSupabaseUrl('http://127.0.0.1:54321/', { allowLocal: true });
       assert.equal(url2, 'http://127.0.0.1:54321');
     });
   });
@@ -154,6 +183,17 @@ describe('Supabase Configuration Validator', () => {
         supabasePublishableKey: 'sb_publishable_my_key_123'
       });
     });
+
+    it('build script validation rejects localhost (allowLocal = false)', () => {
+      assert.throws(
+        () => validateSupabaseConfig({
+          supabaseUrl: 'http://localhost:54321',
+          supabasePublishableKey: 'sb_publishable_test',
+          allowLocal: false
+        }),
+        /Invalid SUPABASE_URL: localhost is only allowed in unpackaged development mode/
+      );
+    });
   });
 
   describe('loadConfig Source Order and Packaging', () => {
@@ -188,6 +228,27 @@ describe('Supabase Configuration Validator', () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
+    it('when packaged, rejects http://localhost even if specified in runtime-config.json', () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pharmacore-test-'));
+      const runtimeConfigPath = path.join(tempDir, 'runtime-config.json');
+
+      fs.writeFileSync(
+        runtimeConfigPath,
+        JSON.stringify({
+          SUPABASE_URL: 'http://localhost:54321',
+          SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_packaged_key_123'
+        }),
+        'utf8'
+      );
+
+      assert.throws(
+        () => loadConfig({ isPackaged: true, runtimeConfigPath }),
+        /Invalid SUPABASE_URL: localhost is only allowed in unpackaged development mode/
+      );
+
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
     it('when packaged, fails if runtime-config.json is missing', () => {
       const missingPath = path.join(os.tmpdir(), 'non-existent-runtime-config.json');
       assert.throws(
@@ -196,7 +257,7 @@ describe('Supabase Configuration Validator', () => {
       );
     });
 
-    it('when dev (not packaged), prefers env over runtime-config.json', () => {
+    it('when dev (not packaged), prefers env over runtime-config.json and allows localhost', () => {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pharmacore-test-'));
       const runtimeConfigPath = path.join(tempDir, 'runtime-config.json');
 
@@ -210,7 +271,7 @@ describe('Supabase Configuration Validator', () => {
       );
 
       const devEnv = {
-        SUPABASE_URL: 'https://dev-env.supabase.co',
+        SUPABASE_URL: 'http://localhost:54321',
         SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_dev_key'
       };
 
@@ -220,10 +281,50 @@ describe('Supabase Configuration Validator', () => {
         env: devEnv
       });
 
-      assert.equal(result.supabaseUrl, 'https://dev-env.supabase.co');
+      assert.equal(result.supabaseUrl, 'http://localhost:54321');
       assert.equal(result.supabasePublishableKey, 'sb_publishable_dev_key');
 
       fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('getConfig and initAppConfig Lifecycle', () => {
+    it('getConfig() before init throws "Configuration not initialized"', () => {
+      resetConfig();
+      assert.throws(
+        () => getConfig(),
+        /Configuration not initialized/
+      );
+    });
+
+    it('failed init followed by getConfig() still throws even if credentials exist in environment', () => {
+      resetConfig();
+      const oldUrl = process.env.SUPABASE_URL;
+      const oldKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+
+      try {
+        process.env.SUPABASE_URL = 'https://valid-in-env.supabase.co';
+        process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_valid_in_env_123';
+
+        const missingPath = path.join(os.tmpdir(), 'missing-runtime-config-for-test.json');
+        if (fs.existsSync(missingPath)) fs.unlinkSync(missingPath);
+
+        // Attempt packaged initialization with missing runtime-config.json
+        assert.throws(
+          () => initAppConfig(true, { runtimeConfigPath: missingPath }),
+          /Missing build-time runtime configuration file/
+        );
+
+        // getConfig() must still throw and NOT load from process.env
+        assert.throws(
+          () => getConfig(),
+          /Configuration not initialized/
+        );
+      } finally {
+        process.env.SUPABASE_URL = oldUrl;
+        process.env.SUPABASE_PUBLISHABLE_KEY = oldKey;
+        resetConfig();
+      }
     });
   });
 });

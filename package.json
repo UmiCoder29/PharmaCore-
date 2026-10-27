@@ -12,7 +12,7 @@
     "build": "node scripts/write-runtime-config.mjs && vite build",
     "preview": "vite preview",
     "make": "node scripts/write-runtime-config.mjs && npm run build && electron-builder --win",
-    "test": "node --test tests/"
+    "test": "node --test"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

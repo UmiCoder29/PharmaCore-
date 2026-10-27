@@ -17,7 +17,8 @@ const key = process.env.SUPABASE_PUBLISHABLE_KEY;
 try {
   const validated = validateSupabaseConfig({
     supabaseUrl: url,
-    supabasePublishableKey: key
+    supabasePublishableKey: key,
+    allowLocal: false
   });
 
   const targetPath = path.join(rootDir, 'electron', 'runtime-config.json');
