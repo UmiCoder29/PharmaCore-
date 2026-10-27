@@ -557,20 +557,20 @@ BEGIN
     -- 0.7 Sales, Line Items & Payments
     INSERT INTO public.sales (id, pharmacy_id, branch_id, subtotal, total_amount, payment_method)
     VALUES 
-        (v_sale_a1, v_pharm_a, v_branch_a1, 100, 100, 'cash'),
+        (v_sale_a1, v_pharm_a, v_branch_a1, 40, 40, 'cash'),
         (v_sale_a2, v_pharm_a, v_branch_a2, 200, 200, 'cash'),
-        (v_sale_b, v_pharm_b, v_branch_b1, 100, 100, 'cash'),
+        (v_sale_b, v_pharm_b, v_branch_b1, 40, 40, 'cash'),
         (v_sale_a_del, v_pharm_a, v_branch_a1, 10, 10, 'cash');
 
-    INSERT INTO public.sale_items (id, pharmacy_id, sale_id, medicine_id, batch_id, price_at_sale, subtotal_item, branch_id)
+    INSERT INTO public.sale_items (id, pharmacy_id, sale_id, medicine_id, batch_id, quantity, price_at_sale, subtotal_item, branch_id)
     VALUES 
-        (v_sale_item_a1, v_pharm_a, v_sale_a1, v_med_a_otc, v_batch_a_otc, 20, 100, v_branch_a1),
-        (v_sale_item_b, v_pharm_b, v_sale_b, v_med_b_otc, v_batch_b_otc, 20, 100, v_branch_b1);
+        (v_sale_item_a1, v_pharm_a, v_sale_a1, v_med_a_otc, v_batch_a_otc, 2, 20, 40, v_branch_a1),
+        (v_sale_item_b, v_pharm_b, v_sale_b, v_med_b_otc, v_batch_b_otc, 2, 20, 40, v_branch_b1);
 
     INSERT INTO public.sale_payments (id, pharmacy_id, sale_id, method, amount)
     VALUES 
-        (v_sale_pay_a1, v_pharm_a, v_sale_a1, 'cash', 100),
-        (v_sale_pay_b, v_pharm_b, v_sale_b, 'cash', 100);
+        (v_sale_pay_a1, v_pharm_a, v_sale_a1, 'cash', 40),
+        (v_sale_pay_b, v_pharm_b, v_sale_b, 'cash', 40);
 
     -- 0.8 Returns & Return Items
     INSERT INTO public.returns (id, pharmacy_id, branch_id, sale_id, refund_method, total_refund_amount, status)
@@ -1214,16 +1214,37 @@ BEGIN
 
 
     -- ==========================================================================
-    -- 11. MAX_BRANCHES LIMIT ENFORCEMENT TEST (EXPECTED TO FAIL ON FIRST RUN)
+    -- 11. MAX_BRANCHES LIMIT ENFORCEMENT TESTS
     -- ==========================================================================
-    UPDATE public.pharmacies SET max_branches = 1 WHERE id = v_pharm_a;
+    -- 11.1 Admin CAN insert a branch while under max_branches
+    UPDATE public.pharmacies SET max_branches = 5 WHERE id = v_pharm_a;
+
+    SELECT * INTO v_outcome, v_err_state, v_err, v_rows FROM pg_temp.run_statement(
+        v_admin_a,
+        'INSERT INTO public.branches (pharmacy_id, name) VALUES (''' || v_pharm_a || ''', ''Branch Under Limit'')',
+        false
+    );
+    CALL pg_temp.log_result('11. Limits Enforcement', 'admin can insert branch while under max_branches', 'admin_a', 'branches', 'INSERT', 'ALLOWED', v_outcome, v_err_state, v_err, false);
+
+    -- 11.2 Admin CANNOT insert a branch beyond max_branches
+    UPDATE public.pharmacies SET max_branches = 3 WHERE id = v_pharm_a;
 
     SELECT * INTO v_outcome, v_err_state, v_err, v_rows FROM pg_temp.run_statement(
         v_admin_a,
         'INSERT INTO public.branches (pharmacy_id, name) VALUES (''' || v_pharm_a || ''', ''Branch Exceeding Limit'')',
         false
     );
-    CALL pg_temp.log_result('11. Limits Enforcement', 'admin cannot insert branch beyond max_branches', 'admin_a', 'branches', 'INSERT', 'BLOCKED', v_outcome, v_err_state, v_err, false);
+    CALL pg_temp.log_result('11. Limits Enforcement', 'admin cannot insert branch beyond max_branches', 'admin_a', 'branches', 'INSERT', 'BLOCKED', v_outcome, v_err_state, v_err, false, 'Branch limit reached');
+
+    -- 11.3 Superadmin CAN insert a branch beyond max_branches (bypasses limit trigger)
+    SELECT * INTO v_outcome, v_err_state, v_err, v_rows FROM pg_temp.run_statement(
+        v_superadmin,
+        'INSERT INTO public.branches (pharmacy_id, name) VALUES (''' || v_pharm_a || ''', ''Superadmin Branch Exceeding Limit'')',
+        false
+    );
+    CALL pg_temp.log_result('11. Limits Enforcement', 'superadmin can insert branch beyond max_branches', 'superadmin', 'branches', 'INSERT', 'ALLOWED', v_outcome, v_err_state, v_err, false);
+
+    -- Note on 11.4: branches table has no is_active column; re-activation quota check not applicable.
 
 
     -- ==========================================================================
@@ -1238,41 +1259,27 @@ BEGIN
     FROM pg_temp.suite_results;
 
     IF v_failed = 0 THEN
-        v_report := 'SUITE_RESULT: PASS (Total: ' || v_total || ', Passed: ' || v_passed || ', Failed: ' || v_failed || ', Known Gaps: ' || v_known || ')' || E'\n';
+        v_report := 'SUITE_RESULT: PASS (Total: ' || v_total || ', Passed: ' || v_passed || ', Failed: ' || v_failed || ', Known Gaps: ' || v_known || ')' || E'\n\n';
     ELSE
-        v_report := 'SUITE_RESULT: FAIL (Total: ' || v_total || ', Passed: ' || v_passed || ', Failed: ' || v_failed || ', Known Gaps: ' || v_known || ')' || E'\n';
+        v_report := 'SUITE_RESULT: FAIL (Total: ' || v_total || ', Passed: ' || v_passed || ', Failed: ' || v_failed || ', Known Gaps: ' || v_known || ')' || E'\n\n';
     END IF;
 
-    v_report := v_report || '================================================================================' || E'\n';
-    v_report := v_report || 'PHARMACORE RLS & SECURITY TEST SUITE AUDIT REPORT' || E'\n';
-    v_report := v_report || '================================================================================' || E'\n\n';
-
-    v_report := v_report || 'SUMMARY COUNTS:' || E'\n';
-    v_report := v_report || '  Total Tests Checked : ' || v_total || E'\n';
-    v_report := v_report || '  Passed              : ' || v_passed || E'\n';
-    v_report := v_report || '  Failed              : ' || v_failed || E'\n';
-    v_report := v_report || '  Known Accepted Gaps : ' || v_known || E'\n\n';
-
-    -- List all failures with detail
+    -- Failures first
     IF v_failed > 0 THEN
-        v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
-        v_report := v_report || 'FAILED TESTS DETAILS (' || v_failed || ' failure(s)):' || E'\n';
-        v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
+        v_report := v_report || 'FAILURES (' || v_failed || '):' || E'\n';
         FOR v_item IN 
             SELECT * FROM pg_temp.suite_results WHERE status = 'FAIL' ORDER BY id
         LOOP
-            v_report := v_report || '  [FAIL] ' || v_item.cat || ' -> ' || v_item.name || E'\n';
-            v_report := v_report || '         Actor   : ' || v_item.actor || E'\n';
-            v_report := v_report || '         Details : ' || v_item.detail || E'\n';
+            v_report := v_report || '  [FAIL] ' || v_item.cat || ' -> ' || v_item.name || ' (' || v_item.actor || '): ' || v_item.detail || E'\n';
         END LOOP;
         v_report := v_report || E'\n';
+    ELSE
+        v_report := v_report || 'FAILURES: None' || E'\n\n';
     END IF;
 
-    -- List known accepted gaps
+    -- KNOWN gaps
     IF v_known > 0 THEN
-        v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
-        v_report := v_report || 'KNOWN ACCEPTED GAPS (Milestone 3 Scope):' || E'\n';
-        v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
+        v_report := v_report || 'KNOWN GAPS (' || v_known || '):' || E'\n';
         FOR v_item IN 
             SELECT * FROM pg_temp.suite_results WHERE status = 'KNOWN' ORDER BY id
         LOOP
@@ -1281,17 +1288,11 @@ BEGIN
         v_report := v_report || E'\n';
     END IF;
 
-    -- Compact 1-line-per-table Matrix: Table | admin S I U D | pharmacist S I U D (. = blocked, x = allowed)
-    v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
-    v_report := v_report || 'CROSS-TENANT ISOLATION MATRIX (19 Tables x 4 Operations x 2 Roles):' || E'\n';
-    v_report := v_report || 'Legend: . = BLOCKED (secure), x = ALLOWED (accessible), ! = TEST_ERROR' || E'\n';
-    v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
-    v_report := v_report || 'TABLE NAME             | ADMIN S I U D | PHARMACIST S I U D' || E'\n';
-    v_report := v_report || '-----------------------+---------------+--------------------' || E'\n';
-
+    -- Compact 19-table matrix (one compact line per table: e.g. "medicines A:.... P:....")
+    v_report := v_report || 'MATRIX (19 tables, S I U D):' || E'\n';
     FOR v_tbl IN SELECT unnest(v_all_tables)
     LOOP
-        v_matrix_line := rpad(v_tbl, 22) || ' | admin ';
+        v_matrix_line := rpad(v_tbl, 23) || ' A:';
 
         -- Admin operations
         FOREACH v_op IN ARRAY ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']
@@ -1305,10 +1306,10 @@ BEGIN
             WHERE cat = '1. Cross-Tenant' AND tbl = v_tbl AND op = v_op AND actor = 'admin_a'
             LIMIT 1;
 
-            v_matrix_line := v_matrix_line || COALESCE(v_outcome, '?') || ' ';
+            v_matrix_line := v_matrix_line || COALESCE(v_outcome, '?');
         END LOOP;
 
-        v_matrix_line := v_matrix_line || '| pharm ';
+        v_matrix_line := v_matrix_line || ' P:';
 
         -- Pharmacist operations
         FOREACH v_op IN ARRAY ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']
@@ -1322,47 +1323,16 @@ BEGIN
             WHERE cat = '1. Cross-Tenant' AND tbl = v_tbl AND op = v_op AND actor = 'pharmacist_a'
             LIMIT 1;
 
-            v_matrix_line := v_matrix_line || COALESCE(v_outcome, '?') || ' ';
+            v_matrix_line := v_matrix_line || COALESCE(v_outcome, '?');
         END LOOP;
 
         v_report := v_report || v_matrix_line || E'\n';
     END LOOP;
-    v_report := v_report || E'\n';
 
-    -- Compact Category Summary
-    v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
-    v_report := v_report || 'CATEGORY SUMMARY BREAKDOWN:' || E'\n';
-    v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
-    FOR v_rec IN 
-        SELECT cat,
-               COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE status = 'PASS') AS passed,
-               COUNT(*) FILTER (WHERE status = 'FAIL') AS failed,
-               COUNT(*) FILTER (WHERE status = 'KNOWN') AS known
-        FROM pg_temp.suite_results
-        GROUP BY cat
-        ORDER BY cat
-    LOOP
-        v_report := v_report || rpad(v_rec.cat, 26) || ' | Total: ' || lpad(v_rec.total::TEXT, 3) 
-                             || ' | Pass: ' || lpad(v_rec.passed::TEXT, 3) 
-                             || ' | Fail: ' || lpad(v_rec.failed::TEXT, 2) 
-                             || ' | Known: ' || lpad(v_rec.known::TEXT, 2) || E'\n';
-    END LOOP;
-
-    -- Verbose mode log
-    IF v_verbose THEN
-        v_report := v_report || E'\n' || '--------------------------------------------------------------------------------' || E'\n';
-        v_report := v_report || 'VERBOSE INDIVIDUAL TEST LOG:' || E'\n';
-        v_report := v_report || '--------------------------------------------------------------------------------' || E'\n';
-        FOR v_item IN SELECT * FROM pg_temp.suite_results ORDER BY id
-        LOOP
-            v_report := v_report || '[' || rpad(v_item.status, 5) || '] ' || rpad(v_item.cat, 22) || ' | ' || (v_item.name) || E'\n';
-        END LOOP;
-    END IF;
-
-    v_report := v_report || E'\n' || '================================================================================' || E'\n';
-    v_report := v_report || 'END OF AUDIT REPORT -- ALL TRANSACTIONS ROLLED BACK SAFELY' || E'\n';
-    v_report := v_report || '================================================================================' || E'\n';
+    -- Repeat SUITE_RESULT totals line plus END marker as very last line
+    v_report := v_report || E'\n' || 'SUITE_RESULT: ' || CASE WHEN v_failed = 0 THEN 'PASS' ELSE 'FAIL' END 
+                || ' (Total: ' || v_total || ', Passed: ' || v_passed || ', Failed: ' || v_failed || ', Known Gaps: ' || v_known || ')' || E'\n';
+    v_report := v_report || 'END OF SUITE' || E'\n';
 
     -- Raise report exception to abort and roll back all changes
     RAISE EXCEPTION E'\n%', v_report;
