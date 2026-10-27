@@ -9,9 +9,10 @@
     "dev": "concurrently -k -n \"vite,electron\" -c \"cyan,magenta\" \"npm run vite:dev\" \"npm run electron:dev\"",
     "vite:dev": "vite",
     "electron:dev": "wait-on http://localhost:5173 && electron .",
-    "build": "vite build",
+    "build": "node scripts/write-runtime-config.mjs && vite build",
     "preview": "vite preview",
-    "make": "npm run build && electron-builder --win"
+    "make": "node scripts/write-runtime-config.mjs && npm run build && electron-builder --win",
+    "test": "node --test tests/"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

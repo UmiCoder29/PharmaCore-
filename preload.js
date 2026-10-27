@@ -66,9 +66,6 @@ contextBridge.exposeInMainWorld('pharmacoreAPI', {
   savePlatformSetting: (key, value, category) =>
     ipcRenderer.invoke('saas:update-platform-settings', { key, value, category }),
   getPublicConfig: () => ipcRenderer.invoke('platform:get-public-config'),
-  getDbConfig: () => ipcRenderer.invoke('saas:get-db-config'),
-  saveDbConfig: (config) => ipcRenderer.invoke('saas:save-db-config', config),
-  testDbConnection: (config) => ipcRenderer.invoke('saas:test-db-connection', config),
 
   // ─── Pharmacy Tenant Subscription & Profile ───────────────────────────────
   getCurrentSubscription: () => ipcRenderer.invoke('pharmacy:get-current-subscription'),

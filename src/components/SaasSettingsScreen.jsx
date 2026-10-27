@@ -12,16 +12,13 @@ import {
   RefreshCw,
   Sliders,
   Globe,
-  Database,
-  Key,
-  Activity,
   Image as ImageIcon,
   HelpCircle,
   AlertTriangle
 } from 'lucide-react';
 
 export default function SaasSettingsScreen({ user }) {
-  const [activeCategory, setActiveCategory] = useState('general'); // general, database, trial, billing, broadcast, security
+  const [activeCategory, setActiveCategory] = useState('general'); // general, trial, billing, broadcast, security
   const [settings, setSettings] = useState({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -39,14 +36,6 @@ export default function SaasSettingsScreen({ user }) {
     logoUrl: ''
   });
 
-  // Database Environment Config
-  const [dbConfig, setDbConfig] = useState({
-    supabaseUrl: '',
-    supabaseAnonKey: '',
-    serviceRoleKey: ''
-  });
-  const [testingDb, setTestingDb] = useState(false);
-  const [dbTestResult, setDbTestResult] = useState(null);
 
   // Trial Policy
   const [trial, setTrial] = useState({
@@ -84,20 +73,16 @@ export default function SaasSettingsScreen({ user }) {
     maxFailedLoginAttempts: 5
   });
 
-  const fetchSettingsAndDb = async () => {
+  const fetchSettings = async () => {
     setLoading(true);
     try {
-      const [data, activeDb] = await Promise.all([
-        window.pharmacoreAPI.getPlatformSettings(),
-        window.pharmacoreAPI.getDbConfig().catch(() => ({}))
-      ]);
+      const data = await window.pharmacoreAPI.getPlatformSettings();
       setSettings(data || {});
-      if (data.platform_identity) setIdentity(prev => ({ ...prev, ...data.platform_identity }));
-      if (data.trial_policy) setTrial(prev => ({ ...prev, ...data.trial_policy }));
-      if (data.billing_instructions) setBilling(prev => ({ ...prev, ...data.billing_instructions }));
-      if (data.broadcast_announcement) setBroadcast(prev => ({ ...prev, ...data.broadcast_announcement }));
-      if (data.security_policy) setSecurity(prev => ({ ...prev, ...data.security_policy }));
-      if (activeDb) setDbConfig(activeDb);
+      if (data?.platform_identity) setIdentity(prev => ({ ...prev, ...data.platform_identity }));
+      if (data?.trial_policy) setTrial(prev => ({ ...prev, ...data.trial_policy }));
+      if (data?.billing_instructions) setBilling(prev => ({ ...prev, ...data.billing_instructions }));
+      if (data?.broadcast_announcement) setBroadcast(prev => ({ ...prev, ...data.broadcast_announcement }));
+      if (data?.security_policy) setSecurity(prev => ({ ...prev, ...data.security_policy }));
     } catch (err) {
       console.error('Failed to load platform settings:', err);
     } finally {
@@ -106,7 +91,7 @@ export default function SaasSettingsScreen({ user }) {
   };
 
   useEffect(() => {
-    fetchSettingsAndDb();
+    fetchSettings();
   }, []);
 
   const handleSaveCategory = async (key, value, category) => {
@@ -139,38 +124,6 @@ export default function SaasSettingsScreen({ user }) {
     }
   };
 
-  const handleTestDatabase = async () => {
-    setTestingDb(true);
-    setDbTestResult(null);
-    try {
-      const res = await window.pharmacoreAPI.testDbConnection(dbConfig);
-      setDbTestResult(res);
-    } catch (err) {
-      setDbTestResult({ success: false, error: err.message });
-    } finally {
-      setTestingDb(false);
-    }
-  };
-
-  const handleSaveDatabaseConfig = async (e) => {
-    e.preventDefault();
-    setSaving(true);
-    setSaveSuccess('');
-    setSaveError('');
-    try {
-      const res = await window.pharmacoreAPI.saveDbConfig(dbConfig);
-      if (res.success) {
-        setSaveSuccess('Database environment updated and runtime clients reconnected!');
-        setTimeout(() => setSaveSuccess(''), 4000);
-      } else {
-        setSaveError(res.error || 'Failed to save database config.');
-      }
-    } catch (err) {
-      setSaveError(err.message || 'Failed to save database credentials.');
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const handleLogoUpload = (e) => {
     const file = e.target.files?.[0];
@@ -238,15 +191,6 @@ export default function SaasSettingsScreen({ user }) {
             <span>Portal Branding & Logo</span>
           </button>
 
-          <button
-            onClick={() => setActiveCategory('database')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl font-bold text-xs transition-all text-left ${
-              activeCategory === 'database' ? 'bg-emerald text-white shadow-md' : 'hover:bg-slate-100 text-ink/80'
-            }`}
-          >
-            <Database className="w-4 h-4 shrink-0 text-amber-300" />
-            <span>Database & API Keys</span>
-          </button>
 
           <button
             onClick={() => setActiveCategory('trial')}
@@ -394,93 +338,7 @@ export default function SaasSettingsScreen({ user }) {
             </form>
           )}
 
-          {/* TAB 2: Database & API Keys */}
-          {activeCategory === 'database' && (
-            <form onSubmit={handleSaveDatabaseConfig} className="space-y-4 text-xs">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-base font-black text-ink mb-1">Database & API Environment Keys</h3>
-                  <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded-full">
-                    SuperAdmin Only
-                  </span>
-                </div>
-                <p className="text-ink/50 text-[11px]">
-                  Switch your live Supabase cloud project URL and API keys on the fly without modifying source code.
-                </p>
-              </div>
 
-              <div>
-                <label className="block font-bold text-ink/80 mb-1">Supabase Project REST URL *</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="https://xyzcompany.supabase.co"
-                  value={dbConfig.supabaseUrl || ''}
-                  onChange={e => setDbConfig({ ...dbConfig, supabaseUrl: e.target.value })}
-                  className="w-full bg-clinical border border-ink/10 rounded-2xl px-3.5 py-2.5 text-xs font-mono font-semibold outline-none focus:border-emerald"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-ink/80 mb-1">Supabase Anon / Public Key *</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="sb_publishable_..."
-                  value={dbConfig.supabaseAnonKey || ''}
-                  onChange={e => setDbConfig({ ...dbConfig, supabaseAnonKey: e.target.value })}
-                  className="w-full bg-clinical border border-ink/10 rounded-2xl px-3.5 py-2.5 text-xs font-mono outline-none focus:border-emerald"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-ink/80 mb-1">Supabase Service Role Key (Admin Bypass)</label>
-                <input
-                  type="password"
-                  placeholder="sb_secret_..."
-                  value={dbConfig.serviceRoleKey || ''}
-                  onChange={e => setDbConfig({ ...dbConfig, serviceRoleKey: e.target.value })}
-                  className="w-full bg-clinical border border-ink/10 rounded-2xl px-3.5 py-2.5 text-xs font-mono outline-none focus:border-emerald"
-                />
-              </div>
-
-              {/* Live Connection Test Box */}
-              {dbTestResult && (
-                <div className={`p-3.5 rounded-2xl text-xs font-bold border flex items-center justify-between ${
-                  dbTestResult.success 
-                    ? 'bg-emerald/10 border-emerald/20 text-emerald' 
-                    : 'bg-rose-50 border-rose-200 text-rose-700'
-                }`}>
-                  <div>
-                    <p>{dbTestResult.success ? `✅ ${dbTestResult.message}` : `❌ ${dbTestResult.error}`}</p>
-                    <p className="font-mono text-[10px] opacity-75 mt-0.5">{dbTestResult.projectUrl}</p>
-                  </div>
-                  <span className="font-mono text-xs">{dbTestResult.latencyMs}ms</span>
-                </div>
-              )}
-
-              <div className="flex items-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={handleTestDatabase}
-                  disabled={testingDb || !dbConfig.supabaseUrl}
-                  className="px-5 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-2xl font-bold transition-all shadow-sm flex items-center gap-2 disabled:opacity-50"
-                >
-                  <Activity className="w-4 h-4 text-emerald" />
-                  <span>{testingDb ? 'Testing Connection...' : 'Test Connection'}</span>
-                </button>
-
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="px-6 py-2.5 bg-emerald hover:bg-emerald/90 text-white font-bold rounded-2xl transition-all shadow-md flex items-center gap-2"
-                >
-                  <Save className="w-4 h-4" />
-                  <span>Save & Apply Database Keys</span>
-                </button>
-              </div>
-            </form>
-          )}
 
           {/* TAB 3: Trial & Onboarding Policy */}
           {activeCategory === 'trial' && (

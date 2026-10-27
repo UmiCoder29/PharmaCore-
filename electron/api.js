@@ -13,10 +13,7 @@ import {
 import { 
   getSupabaseClient, 
   getConnectionStatus, 
-  getAdminClient,
-  loadDatabaseConfig,
-  saveDatabaseConfig,
-  testDatabaseConnection
+  getAdminClient
 } from './supabaseClient.js';
 import { getCacheData, setCacheData } from './localCache.js';
 import { getCurrentUser, updateCurrentUserPharmacyBranding } from './auth.js';
@@ -958,32 +955,6 @@ export function registerAppIpcHandlers(ipcMain) {
     };
   });
 
-  // ============================================================================
-  // --- DATABASE & API ENVIRONMENT SETTINGS ---
-  // ============================================================================
-
-  // SuperAdmin: Get active database & API environment keys
-  ipcMain.handle('saas:get-db-config', async () => {
-    requireSuperAdmin();
-    return loadDatabaseConfig();
-  });
-
-  // SuperAdmin: Save active database & API environment keys
-  ipcMain.handle('saas:save-db-config', async (_event, config) => {
-    requireSuperAdmin();
-    try {
-      const res = await saveDatabaseConfig(config);
-      return res;
-    } catch (err) {
-      return { success: false, error: err.message };
-    }
-  });
-
-  // SuperAdmin: Test database connectivity with specified URL/Keys
-  ipcMain.handle('saas:test-db-connection', async (_event, config) => {
-    requireSuperAdmin();
-    return testDatabaseConnection(config);
-  });
 
   // Pharmacy: Update branding & store profile (Name, Logo URL/Data, City, Address, Phone, Tax Number)
   ipcMain.handle('pharmacy:update-branding', async (_event, brandingData) => {

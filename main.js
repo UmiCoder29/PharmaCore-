@@ -1,14 +1,13 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
-import { app, BrowserWindow, ipcMain } from 'electron';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 
-import { setApp }              from './electron/paths.js';
-import { registerIpcHandlers } from './electron/auth.js';
+import { setApp, getDataDir }   from './electron/paths.js';
+import { initAppConfig }        from './electron/config.js';
+import { registerIpcHandlers }  from './electron/auth.js';
 import { registerAppIpcHandlers } from './electron/api.js';
-import { initSupabase }        from './electron/supabaseClient.js';
+import { initSupabase }         from './electron/supabaseClient.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -17,9 +16,30 @@ const __dirname  = path.dirname(__filename);
 // localCache.js and offlineQueue.js can find the correct userData directory.
 setApp(app);
 
-// ─── Supabase Initialisation ──────────────────────────────────────────────────
-// Initialise the Supabase client using environment variables (publishable/anon key only).
-initSupabase();
+// At startup, if an old db-config.json exists in the user data folder, delete it.
+try {
+  const legacyDbConfig = path.join(getDataDir(), 'db-config.json');
+  if (fs.existsSync(legacyDbConfig)) {
+    fs.unlinkSync(legacyDbConfig);
+    console.log('[Startup] Removed legacy db-config.json from userData directory.');
+  }
+} catch (err) {
+  console.warn('[Startup] Could not remove legacy db-config.json:', err.message);
+}
+
+// ─── Supabase Configuration & Initialisation ─────────────────────────────────
+// Initialize build-time (packaged) or dev environment configuration.
+// Fails fast if required credentials are missing or invalid.
+try {
+  initAppConfig(app.isPackaged);
+  initSupabase();
+} catch (err) {
+  console.error('\n[PharmaCore Startup Error]', err.message);
+  app.whenReady().then(() => {
+    dialog.showErrorBox('PharmaCore Configuration Error', err.message);
+    app.quit();
+  });
+}
 
 // Register all auth IPC handlers (auth:login, auth:logout, auth:create-user, etc.)
 registerIpcHandlers(ipcMain);

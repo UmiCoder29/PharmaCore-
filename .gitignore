@@ -44,6 +44,8 @@ keystore.json
 pharmacore_db.enc
 failed_login_attempts.json
 db-config.json
+runtime-config.json
+electron/runtime-config.json
 
 # ─── Private Keys, License Keys & Certificates ────────────────────────────────
 *.pem
