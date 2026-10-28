@@ -1,4 +1,6 @@
+<img width="285" height="289" alt="icon" src="https://github.com/user-attachments/assets/55d02454-5ce4-4762-8767-e4eae3b9b99b" />
 # PharmaCore ERP + POS 💊🏥
+
 
 [![Electron](https://img.shields.io/badge/Electron-31.0+-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18.3+-61DAFB?logo=react&logoColor=black)](https://react.dev/)
