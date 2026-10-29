@@ -6,7 +6,7 @@ import { parse } from '@babel/parser';
 import traverseModule from '@babel/traverse';
 
 // Import the REAL functions from electron modules
-import { requireSuperAdmin } from '../electron/api.js';
+import { requireSuperAdmin, registerAppIpcHandlers } from '../electron/api.js';
 import { _setCurrentUserForTesting, getCurrentUser, loginUser } from '../electron/auth.js';
 
 import { _setSupabaseClientForTesting, clearSupabase } from '../electron/supabaseClient.js';
@@ -203,6 +203,143 @@ describe('SuperAdmin Access Control & Handlers', () => {
       const currentUser = getCurrentUser();
       assert.equal(currentUser.id, 'usr-1');
       assert.equal(currentUser.role, 'superadmin');
+    });
+  });
+
+  describe('saas:get-platform-stats Handler Error Resilience (real IPC handler with mocked client)', () => {
+    let statsHandler = null;
+
+    beforeEach(() => {
+      const handlers = {};
+      const mockIpcMain = {
+        handle: (channel, fn) => {
+          handlers[channel] = fn;
+        }
+      };
+      registerAppIpcHandlers(mockIpcMain);
+      statsHandler = handlers['saas:get-platform-stats'];
+
+      _setCurrentUserForTesting({
+        id: 'usr-super-1',
+        username: 'superadmin',
+        role: 'superadmin'
+      });
+    });
+
+    afterEach(() => {
+      _setCurrentUserForTesting(null);
+      _setSupabaseClientForTesting(null);
+      clearSupabase();
+    });
+
+    it('fails when subscription_plans query fails (returns success:false with error, never success:true)', async () => {
+      const mockClient = {
+        from: (table) => {
+          if (table === 'subscription_plans') {
+            return {
+              select: () => Promise.resolve({
+                data: null,
+                error: { message: 'relation subscription_plans does not exist' }
+              })
+            };
+          }
+          const chain = {
+            select: () => chain,
+            eq: () => chain,
+            in: () => chain,
+            then: (res) => res({ count: 5, error: null })
+          };
+          return chain;
+        },
+        rpc: async () => ({ data: null, error: null })
+      };
+      _setSupabaseClientForTesting(mockClient);
+
+      const res = await statsHandler();
+      assert.equal(res.success, false);
+      assert.match(res.error, /relation subscription_plans does not exist/);
+    });
+
+    it('fails when any platform count query fails (returns success:false with error, never 0 or success:true)', async () => {
+      const mockClient = {
+        from: (table) => {
+          if (table === 'subscription_plans') {
+            return {
+              select: () => Promise.resolve({
+                data: [{ slug: 'starter', price_monthly: 3000 }],
+                error: null
+              })
+            };
+          }
+          if (table === 'sales') {
+            const chain = {
+              select: () => chain,
+              then: (res) => res({ count: null, error: { message: 'Connection timeout counting sales rows' } })
+            };
+            return chain;
+          }
+          const chain = {
+            select: () => chain,
+            eq: () => chain,
+            in: () => chain,
+            then: (res) => res({ count: 12, error: null })
+          };
+          return chain;
+        },
+        rpc: async () => ({ data: null, error: null })
+      };
+      _setSupabaseClientForTesting(mockClient);
+
+      const res = await statsHandler();
+      assert.equal(res.success, false);
+      assert.match(res.error, /Connection timeout counting sales rows/);
+    });
+
+    it('fails when a tier-count query fails (returns success:false with error, never 0 or success:true)', async () => {
+      const mockClient = {
+        from: (table) => {
+          if (table === 'subscription_plans') {
+            return {
+              select: () => Promise.resolve({
+                data: [
+                  { slug: 'starter', price_monthly: 3000 },
+                  { slug: 'professional', price_monthly: 8000 }
+                ],
+                error: null
+              })
+            };
+          }
+          if (table === 'pharmacies') {
+            const chain = {
+              select: () => chain,
+              eq: (col, val) => {
+                if (col === 'plan_tier' && val === 'professional') {
+                  return {
+                    then: (res) => res({ count: null, error: { message: 'Database deadlock while counting professional tier' } })
+                  };
+                }
+                return chain;
+              },
+              in: () => chain,
+              then: (res) => res({ count: 8, error: null })
+            };
+            return chain;
+          }
+          const chain = {
+            select: () => chain,
+            eq: () => chain,
+            in: () => chain,
+            then: (res) => res({ count: 4, error: null })
+          };
+          return chain;
+        },
+        rpc: async () => ({ data: null, error: null })
+      };
+      _setSupabaseClientForTesting(mockClient);
+
+      const res = await statsHandler();
+      assert.equal(res.success, false);
+      assert.match(res.error, /Database deadlock while counting professional tier/);
     });
   });
 });
