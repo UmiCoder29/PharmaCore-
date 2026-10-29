@@ -1,66 +1,61 @@
-1. What this product is
+# skills.md - PharmaCore working rules
 
-PharmaCore is a multi-tenant pharmacy ERP and point-of-sale SaaS. Its pitch is: the pharmacy software that proves every medicine is real, starting in Karachi, Pakistan and built for the world. The differentiator is verification of the 2D Data Matrix barcodes that DRAP (Drug Regulatory Authority of Pakistan) made mandatory on all new medicine packs from 9 October 2026, plus an audit log and an inspection-ready compliance report.
+PharmaCore is a multi-tenant pharmacy ERP + POS. It will hold real medicine stock, sales and patient-adjacent business data for several pharmacies. A bug here can leak one pharmacy's data to another, corrupt stock counts, or sell expired medicine. Quality and security come before speed. Be slow and correct.
 
-It is being built for the World's Biggest Business Competition (App Builder track). The build window ends 20 November 2026, with a first paying customer targeted for week 3.
+## 1. Non-negotiable security rules
+1. The desktop app and the renderer NEVER hold a service role key, a secret key, a JWT secret, or a database password. Only SUPABASE_URL and the publishable key. getAdminClient() returns null on purpose; never bring it back, never fake it.
+2. Privileged work (creating or deleting auth users, resetting passwords, anything that needs the Auth admin API) happens only in a server-side function (Supabase Edge Function). The secret lives only on the server.
+3. Security is enforced by the database (RLS policies, constraints, SECURITY DEFINER functions with a fixed search_path), never only by hiding a button or checking a role in the UI. Treat the renderer and every IPC call as hostile input.
+4. Every IPC handler that touches tenant or platform data starts by checking the caller's role (requireSuperAdmin or the equivalent), then validates every argument (type, length, allowed values) before using it.
+5. Tenant isolation: every query on a tenant table must be safe if the caller changes a pharmacy_id or branch_id in the request. RLS must make that fail, not the client code.
+6. Never log passwords, tokens, keys, full user records, or stack traces to the UI. Error text shown to the user is short and readable.
+7. Never add a public (anon) way to turn a username into an email, list users, or confirm that an account exists.
+8. No new dependency without telling me the name, why it is needed, and what safer built-in option you rejected.
 
-2. Stack and decisions already made
-Frontend: React 18, Vite 5, Tailwind CSS 3.4, GSAP for animation, lucide-react for icons. Keep the emerald green theme and the existing layout.
-Backend: Supabase (Postgres, Row Level Security, Auth, Realtime, Edge Functions). A brand new Supabase project replaces the old deleted ones.
-Product shape: web-first SaaS with an offline mode that syncs later. The existing Electron app stays untouched as a fallback and must not be extended with new features.
-Money: prices stored per base unit (tablet). Strip and box prices are computed for display only.
-Stock: the base unit (tablet) is authoritative for stock. Deduction follows FEFO (first expiry, first out) by batch.
-Global-ready: country rules (barcode standard, tax, currency, regulator name) live in a country profile setting, never hardcoded. Pakistan is the first profile.
-3. Security rules (never break these)
-Never put a service role key, secret key, JWT secret, or any password in client code, scripts, SQL seed files, documentation, or commits. Only the publishable (anon) key may ship in the frontend, read from environment variables.
-Every table has Row Level Security enabled. Every policy ties rows to the caller's pharmacy through the pharmacy id. A user from one pharmacy must never be able to read or write another pharmacy's rows.
-Anything needing admin power (creating users, onboarding a pharmacy, resetting passwords, superadmin views) runs in a Supabase Edge Function that verifies the caller's role from their JWT. Never in the client.
-Every SECURITY DEFINER function sets a fixed search_path and checks the caller's pharmacy and role inside the function body.
-The anonymous role gets no table privileges except where a table is deliberately public, and each such exception must be written down with a reason.
-No default passwords. New accounts must change their password on first login.
-Before every commit, run a secrets scan for key patterns (sb_secret_, sb_publishable_ with real values, long JWT strings, private key headers, old project IDs). Show the result and wait for approval before committing.
-Add an .env.example listing variable names only.
-4. Database rules
-All schema changes are migration files in supabase/migrations/, named with a timestamp prefix. Never edit a migration that has already been applied; add a new one.
-Every table has: id (uuid), pharmacy_id, created_at, and updated_at where it makes sense. Use soft delete (a deleted_at column) for medicines and anything referenced by sales history.
-Money columns use numeric, not float. Quantities are integers in base units.
-Add an index for every foreign key and every column used in a policy or frequent filter.
-Stock changes and sales happen inside a single database transaction. Never update stock from the client in separate calls.
-Write the rollback note in a comment at the top of each migration.
-5. Coding standards
-Small components, one responsibility each. No file over about 400 lines without a good reason.
-Handle loading, empty, and error states on every screen. Never leave a blank screen.
-Validate all input on the client for speed and again in the database or Edge Function for safety.
-No new dependency without saying why, and what it costs in bundle size.
-Keep user-facing text in one place so Urdu can be added later.
-Use clear names. Comment the reason for anything unusual, not what the code obviously does.
-6. Hard do-not-touch list
-Do not delete or rewrite working POS, returns, batch, supplier, or multi-branch logic unless the prompt says so.
-Do not change the emerald theme or the overall layout.
-Do not add features that are not in the current prompt.
-Do not push to GitHub, apply migrations to a live database, or deploy without being told to.
-Do not invent medical data. Medicine names, formulas, and prices come from imports or user input only.
-7. Regulatory and domain context
-DRAP Phase I: all locally manufactured and imported pharmaceutical products manufactured or imported on or after 9 October 2026 must carry a unique 2D Data Matrix barcode with a serial number, under the Pharmaceutical Track and Trace System. Older stock is exempt and remains legal to sell, so pharmacies hold mixed stock (coded and uncoded) for months.
-A pack serial number should be sellable once. A second scan of the same serial must be blocked and logged as a possible counterfeit or duplicate.
-A free DRAP verification app for consumers and pharmacists is expected. PharmaCore must not rely on charging for scan-to-verify alone. Its value is scanning inside the checkout flow, blocking bad packs automatically, tracking coded and uncoded batches, and producing the audit log and inspection report.
-FBR and SRB tax handling and DRAP record-keeping rules need a consultation before invoicing real customers. Flag anything that looks like a legal claim and do not state it as certain.
-Pharmacy data is private. Treat customer and prescription data as sensitive.
-8. How to work with me
-Work on one prompt at a time. Do exactly what the prompt says.
-Before changing anything, read the relevant files and state a short plan in plain English.
-After changing anything, list the files you touched and what changed, then say how to test it.
-If something in the prompt is unclear or conflicts with these rules, stop and ask. Do not guess.
-If you find a bug or security problem outside the prompt, report it at the end. Do not fix it silently.
-Keep explanations short. I am a self-taught developer who learns by building, so plain language beats theory.
-9. Definition of done for any prompt
-The code runs with no console errors.
-The change was tested by hand and the steps are written out.
-No secrets, no default passwords, no hardcoded project URLs.
-Security rules in section 3 still hold.
-Nothing outside the prompt's scope changed.
+## 2. Data integrity rules (pharmacy-specific)
+1. Stock, sales and returns change inside one database transaction or one RPC. A half-finished sale must be impossible.
+2. The base unit (tablet) is the single source of truth for stock. Strip and box quantities are display only.
+3. Expiry rules (FEFO, never sell an expired batch) are enforced in the database function, not only in the UI.
+4. Money uses exact decimal types, never floating point. Round once, at one documented place.
+5. Returns can never exceed what was sold. Voids and returns leave an audit row. Nothing is silently deleted.
 
-- Migration files are named YYYYMMDDNNNNNN_description.sql (timestamp, then a sequence number) and run in order.
-- A migration that has been applied to any database is never edited. Any fix is a new migration file.
-- Migrations run in the Supabase SQL Editor as the postgres role. Never alter default privileges for supabase_admin or other Supabase-managed roles, and never modify the auth, storage or realtime schemas.
-- A row-level policy for the anon role must not call helper functions that anon cannot execute. Write separate anon and authenticated policies.
+## 3. Honesty rules (most important for quality)
+1. Never say something works unless you ran it and can show the exact command and the exact output. "Should work" and "looks correct" are not results.
+2. If a test fails, say it failed and paste the output. Never weaken, skip, delete or rewrite a test to make it pass. If a test is wrong, explain why and ask me.
+3. Never invent a file, function, table, column, policy or setting. If you have not read it in this repo or the live schema, say you have not verified it.
+4. If you are unsure, say "I am not sure" and name what you would check. A confident wrong answer is worse than an honest gap.
+5. Never hide a failure: no empty catch blocks, no silent fallbacks to cached or local data that make a broken feature look fine, no swallowed errors.
+6. Report anything you notice outside the task at the end, as a list. Do not fix it silently and do not ignore it.
+
+## 4. How to work on every task
+1. Read first. Open the real files and list what you found before proposing anything. Quote file and line.
+2. Show a short plan and WAIT for my approval before changing code.
+3. Make the smallest change that solves the problem. No drive-by refactors, no renaming, no reformatting of untouched code.
+4. Work in small steps. One logical change per commit, with a clear message. Never mention prompt numbers in code, comments or commit messages.
+5. Write the test BEFORE or WITH the fix. For a bug, first write a test that fails because of the bug, then fix it, then show it passes.
+6. After finishing, run the full test suite and show the count. A new failure caused by your change is yours to fix.
+7. Attack your own work before handing it over: list 3 ways someone could break or abuse this change (wrong role, another pharmacy's id, empty value, huge value, replayed request, bad type) and show you tested each.
+8. Finish with: files touched, what changed, exact commands to verify by hand, anything left disabled and why, and open risks.
+
+## 5. Hard limits (stop and ask first)
+- Do not apply, create or edit migrations on a live database. I apply database changes after review. Do not edit migrations that already exist; add a new one.
+- Do not commit, push, delete files, or run destructive commands (rm -rf, DROP, TRUNCATE, git reset --hard, force push) without my approval.
+- Do not touch .env or any file that holds keys.
+- Do not run scripts against a live project unless the prompt says so.
+- Do not use real pharmacy data, my real superadmin password, or real keys in tests, logs or examples. Use throwaway test accounts and placeholders.
+
+## 6. Code quality
+- Match the existing style and structure. Prefer small, named functions with one job.
+- Validate at the boundary, trust nothing from the renderer, handle every error path with a visible, honest result.
+- Every user-facing failure shows a clear message and a way forward; never a blank screen.
+- Comments explain WHY, not what. No dead code, no commented-out code, no TODOs without a reason.
+- Accessibility and clarity: labels on inputs, readable errors, keyboard-usable forms.
+
+## 7. Checklist before you say "done"
+- [ ] I read the real files, not assumptions.
+- [ ] The plan was approved.
+- [ ] Tests were written and the full suite passes (count shown).
+- [ ] I tried to break my own change and wrote down the results.
+- [ ] No secret, key, real password or real ID is anywhere in the diff.
+- [ ] No empty catch, no silent fallback, no fake data.
+- [ ] I listed everything I touched, everything I left disabled, and everything else I noticed.
