@@ -75,16 +75,38 @@ export default function SaasSettingsScreen({ user }) {
 
   const fetchSettings = async () => {
     setLoading(true);
+    setSaveError('');
     try {
-      const data = await window.pharmacoreAPI.getPlatformSettings();
-      setSettings(data || {});
-      if (data?.platform_identity) setIdentity(prev => ({ ...prev, ...data.platform_identity }));
-      if (data?.trial_policy) setTrial(prev => ({ ...prev, ...data.trial_policy }));
-      if (data?.billing_instructions) setBilling(prev => ({ ...prev, ...data.billing_instructions }));
-      if (data?.broadcast_announcement) setBroadcast(prev => ({ ...prev, ...data.broadcast_announcement }));
-      if (data?.security_policy) setSecurity(prev => ({ ...prev, ...data.security_policy }));
+      const res = await window.pharmacoreAPI.getPlatformSettings();
+      if (res && res.success === false) {
+        setSaveError(res.error || 'Failed to load platform settings.');
+        return;
+      }
+      const data = res?.data || res || {};
+      setSettings(data);
+      if (data?.platform_identity) {
+        const val = typeof data.platform_identity === 'string' ? JSON.parse(data.platform_identity) : data.platform_identity;
+        setIdentity(prev => ({ ...prev, ...val }));
+      }
+      if (data?.trial_policy) {
+        const val = typeof data.trial_policy === 'string' ? JSON.parse(data.trial_policy) : data.trial_policy;
+        setTrial(prev => ({ ...prev, ...val }));
+      }
+      if (data?.billing_instructions) {
+        const val = typeof data.billing_instructions === 'string' ? JSON.parse(data.billing_instructions) : data.billing_instructions;
+        setBilling(prev => ({ ...prev, ...val }));
+      }
+      if (data?.broadcast_announcement) {
+        const val = typeof data.broadcast_announcement === 'string' ? JSON.parse(data.broadcast_announcement) : data.broadcast_announcement;
+        setBroadcast(prev => ({ ...prev, ...val }));
+      }
+      if (data?.security_policy) {
+        const val = typeof data.security_policy === 'string' ? JSON.parse(data.security_policy) : data.security_policy;
+        setSecurity(prev => ({ ...prev, ...val }));
+      }
     } catch (err) {
       console.error('Failed to load platform settings:', err);
+      setSaveError(err.message || 'Failed to load platform settings.');
     } finally {
       setLoading(false);
     }
@@ -112,6 +134,7 @@ export default function SaasSettingsScreen({ user }) {
       const res = await apiFn(key, value, category);
       if (res && res.success) {
         setSaveSuccess('Configuration updated and synced across all pharmacy workspaces.');
+        setSettings(prev => ({ ...prev, [key]: value }));
         setTimeout(() => setSaveSuccess(''), 4000);
       } else {
         setSaveError(res?.error || 'Failed to update settings.');
@@ -156,7 +179,7 @@ export default function SaasSettingsScreen({ user }) {
         </div>
 
         <button
-          onClick={fetchSettingsAndDb}
+          onClick={fetchSettings}
           className="p-2.5 bg-white border border-ink/10 rounded-2xl hover:bg-slate-50 transition-all text-ink shadow-sm self-start"
           title="Refresh Settings"
         >
@@ -204,22 +227,36 @@ export default function SaasSettingsScreen({ user }) {
 
           <button
             onClick={() => setActiveCategory('billing')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl font-bold text-xs transition-all text-left ${
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl font-bold text-xs transition-all text-left ${
               activeCategory === 'billing' ? 'bg-emerald text-white shadow-md' : 'hover:bg-slate-100 text-ink/80'
             }`}
           >
-            <CreditCard className="w-4 h-4 shrink-0" />
-            <span>Bank & Payment Accounts</span>
+            <div className="flex items-center gap-3">
+              <CreditCard className="w-4 h-4 shrink-0" />
+              <span>Bank & Payment Accounts</span>
+            </div>
+            {!settings.billing_instructions && (
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${activeCategory === 'billing' ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800'}`}>
+                Not saved
+              </span>
+            )}
           </button>
 
           <button
             onClick={() => setActiveCategory('broadcast')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl font-bold text-xs transition-all text-left ${
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl font-bold text-xs transition-all text-left ${
               activeCategory === 'broadcast' ? 'bg-emerald text-white shadow-md' : 'hover:bg-slate-100 text-ink/80'
             }`}
           >
-            <Megaphone className="w-4 h-4 shrink-0" />
-            <span>Broadcast Announcements</span>
+            <div className="flex items-center gap-3">
+              <Megaphone className="w-4 h-4 shrink-0" />
+              <span>Broadcast Announcements</span>
+            </div>
+            {!settings.broadcast_announcement && (
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${activeCategory === 'broadcast' ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800'}`}>
+                Not saved
+              </span>
+            )}
           </button>
 
           <button
@@ -420,7 +457,14 @@ export default function SaasSettingsScreen({ user }) {
           {activeCategory === 'billing' && (
             <form onSubmit={(e) => { e.preventDefault(); handleSaveCategory('billing_instructions', billing, 'billing'); }} className="space-y-4 text-xs">
               <div>
-                <h3 className="text-base font-black text-ink mb-1">Payment Instructions & Direct Bank Accounts</h3>
+                <div className="flex items-center gap-2 mb-1">
+                  <h3 className="text-base font-black text-ink">Payment Instructions & Direct Bank Accounts</h3>
+                  {!settings.billing_instructions && (
+                    <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-[10px] font-bold">
+                      Default (not saved yet)
+                    </span>
+                  )}
+                </div>
                 <p className="text-ink/50 text-[11px]">These details are displayed to pharmacy owners on their Subscription & Renewal Screen.</p>
               </div>
 
@@ -515,7 +559,14 @@ export default function SaasSettingsScreen({ user }) {
           {activeCategory === 'broadcast' && (
             <form onSubmit={(e) => { e.preventDefault(); handleSaveCategory('broadcast_announcement', broadcast, 'broadcast'); }} className="space-y-4 text-xs">
               <div>
-                <h3 className="text-base font-black text-ink mb-1">Global System Announcement Banner</h3>
+                <div className="flex items-center gap-2 mb-1">
+                  <h3 className="text-base font-black text-ink">Global System Announcement Banner</h3>
+                  {!settings.broadcast_announcement && (
+                    <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-[10px] font-bold">
+                      Default (not saved yet)
+                    </span>
+                  )}
+                </div>
                 <p className="text-ink/50 text-[11px]">Display an alert or notice banner across all active pharmacy workstations in real time.</p>
               </div>
 

@@ -32,14 +32,19 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
     event.preventDefault();
     setLoginError('');
     if (!username.trim() || !password) {
-      setLoginError('Enter your username and password to continue.');
+      setLoginError('Invalid email or password.');
+      return;
+    }
+    const trimmed = username.trim().toLowerCase();
+    if (!trimmed.includes('@')) {
+      setLoginError('Invalid email or password.');
       return;
     }
     setLoginLoading(true);
     gsap.to(formRef.current, { scale: 0.985, duration: 0.16, yoyo: true, repeat: 1 });
     
     try {
-      const result = await window.pharmacoreAPI.login(username.trim(), password);
+      const result = await window.pharmacoreAPI.login(trimmed, password);
       if (result.success) {
         if (result.mustChangePassword) {
           setPendingUser(result);
@@ -58,12 +63,12 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
           });
         }
       } else {
-        setLoginError(result.error || 'The credentials could not be verified.');
+        setLoginError('Invalid email or password.');
         setPassword('');
         setLoginLoading(false);
       }
     } catch {
-      setLoginError('Could not reach the cloud pharmacy service. Please try again.');
+      setLoginError('Invalid email or password.');
       setLoginLoading(false);
     }
   };
@@ -153,16 +158,16 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
 
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <label className="block">
-                  <span className="mb-2 block text-xs font-bold text-ink/75">Username / Employee ID</span>
+                  <span className="mb-2 block text-xs font-bold text-ink/75">Email Address</span>
                   <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
                     <User className="mr-3 h-4 w-4 text-emerald" />
                     <input
                       autoFocus
-                      type="text"
+                      type="email"
                       value={username}
                       onChange={e => setUsername(e.target.value)}
                       disabled={loginLoading}
-                      placeholder="e.g. admin or staff username"
+                      placeholder="e.g. admin@yourpharmacy.com"
                       className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
                     />
                   </div>

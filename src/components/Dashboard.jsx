@@ -485,10 +485,10 @@ export default function Dashboard({ user, onLogout }) {
             {/* SuperAdmin Views */}
             {isSuperAdmin && (
               <>
-                {activeTab === 'saas-admin' && <SaasAdminScreen user={user} />}
-                {activeTab === 'saas-chat' && <SaasChatScreen user={user} />}
-                {activeTab === 'saas-plans' && <SaasPlansScreen user={user} />}
-                {activeTab === 'saas-settings' && <SaasSettingsScreen user={user} />}
+                {activeTab === 'saas-admin' && <ErrorBoundary><SaasAdminScreen user={user} /></ErrorBoundary>}
+                {activeTab === 'saas-chat' && <ErrorBoundary><SaasChatScreen user={user} /></ErrorBoundary>}
+                {activeTab === 'saas-plans' && <ErrorBoundary><SaasPlansScreen user={user} /></ErrorBoundary>}
+                {activeTab === 'saas-settings' && <ErrorBoundary><SaasSettingsScreen user={user} /></ErrorBoundary>}
               </>
             )}
 

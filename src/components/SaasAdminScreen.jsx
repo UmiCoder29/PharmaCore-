@@ -69,12 +69,24 @@ export default function SaasAdminScreen({ user }) {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [pharmData, platformStats] = await Promise.all([
+      const [pharmRes, statsRes] = await Promise.all([
         window.pharmacoreAPI.getPharmacies(),
         window.pharmacoreAPI.getPlatformStats()
       ]);
-      setPharmacies(pharmData || []);
-      setStats(platformStats || null);
+
+      if (pharmRes && pharmRes.success === false) {
+        showNotice(pharmRes.error || 'Failed to load pharmacies.', 'error');
+        setPharmacies([]);
+      } else {
+        setPharmacies(Array.isArray(pharmRes) ? pharmRes : (pharmRes?.data || []));
+      }
+
+      if (statsRes && statsRes.success === false) {
+        showNotice(statsRes.error || 'Failed to load platform stats.', 'error');
+        setStats(null);
+      } else {
+        setStats(statsRes?.data || statsRes || null);
+      }
     } catch (err) {
       console.error('Failed to load SaaS data:', err);
       showNotice('Failed to load platform data: ' + (err.message || ''), 'error');
@@ -149,13 +161,18 @@ export default function SaasAdminScreen({ user }) {
         newExpiry.setDate(newExpiry.getDate() + parseInt(editData.extensionDays, 10));
       }
 
-      await window.pharmacoreAPI.updatePharmacySubscription(selectedPharmacy.id, {
+      const res = await window.pharmacoreAPI.updatePharmacySubscription(selectedPharmacy.id, {
         planTier: editData.planTier,
         subscriptionStatus: editData.subscriptionStatus,
         subscriptionEndsAt: editData.extensionDays > 0 ? newExpiry.toISOString() : undefined,
         maxBranches: editData.maxBranches,
         maxUsers: editData.maxUsers
       });
+
+      if (res && res.success === false) {
+        showNotice(res.error || 'Failed to update subscription.', 'error');
+        return;
+      }
 
       showNotice(`Subscription for "${selectedPharmacy.name}" updated.`);
       setShowEditModal(false);
@@ -170,7 +187,11 @@ export default function SaasAdminScreen({ user }) {
   const handleToggleStatus = async (pharmacy, newStatus) => {
     setActionLoading(true);
     try {
-      await window.pharmacoreAPI.togglePharmacyStatus(pharmacy.id, newStatus);
+      const res = await window.pharmacoreAPI.togglePharmacyStatus(pharmacy.id, newStatus);
+      if (res && res.success === false) {
+        showNotice(res.error || 'Failed to change status.', 'error');
+        return;
+      }
       showNotice(`Pharmacy "${pharmacy.name}" status changed to ${newStatus}.`);
       fetchData();
     } catch (err) {
@@ -187,10 +208,15 @@ export default function SaasAdminScreen({ user }) {
       const baseDate = currentExpiry > new Date() ? currentExpiry : new Date();
       baseDate.setDate(baseDate.getDate() + days);
 
-      await window.pharmacoreAPI.updatePharmacySubscription(pharmacy.id, {
+      const res = await window.pharmacoreAPI.updatePharmacySubscription(pharmacy.id, {
         subscriptionStatus: 'active',
         subscriptionEndsAt: baseDate.toISOString()
       });
+
+      if (res && res.success === false) {
+        showNotice(res.error || 'Failed to extend subscription.', 'error');
+        return;
+      }
 
       showNotice(`Extended "${pharmacy.name}" by ${days} days.`);
       fetchData();
@@ -263,7 +289,7 @@ export default function SaasAdminScreen({ user }) {
 
       {/* Platform Analytics KPI Grid */}
       {stats && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <div className="bg-white p-5 rounded-2xl border border-ink/10 shadow-sm flex items-center justify-between">
             <div>
               <p className="text-xs font-bold text-ink/50 uppercase tracking-wider">Total Clients</p>
@@ -287,6 +313,22 @@ export default function SaasAdminScreen({ user }) {
             </div>
             <div className="w-12 h-12 bg-amber/10 text-amber rounded-2xl flex items-center justify-center">
               <DollarSign className="w-6 h-6" />
+            </div>
+          </div>
+
+          <div className="bg-white p-5 rounded-2xl border border-ink/10 shadow-sm flex items-center justify-between">
+            <div>
+              <p className="text-xs font-bold text-ink/50 uppercase tracking-wider">Platform Revenue</p>
+              <p className="text-2xl font-black text-ink mt-1">
+                {stats.totalSalesRevenue !== null && stats.totalSalesRevenue !== undefined
+                  ? `${stats.currency || 'PKR'} ${stats.totalSalesRevenue.toLocaleString()}`
+                  : <span className="text-sm font-semibold text-ink/40">Not available yet</span>
+                }
+              </p>
+              <p className="text-xs font-semibold text-ink/60 mt-1">Tenant GMV volume</p>
+            </div>
+            <div className="w-12 h-12 bg-emerald/10 text-emerald rounded-2xl flex items-center justify-center">
+              <Sparkles className="w-6 h-6" />
             </div>
           </div>
 

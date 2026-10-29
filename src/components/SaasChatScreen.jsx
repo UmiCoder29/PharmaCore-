@@ -29,8 +29,13 @@ export default function SaasChatScreen({ user }) {
 
   const fetchInquiries = async () => {
     try {
-      const data = await window.pharmacoreAPI.getSaasInquiries();
-      setInquiries(data || []);
+      const res = await window.pharmacoreAPI.getSaasInquiries();
+      if (res && res.success === false) {
+        console.error('Failed to load inquiries:', res.error);
+        setInquiries([]);
+      } else {
+        setInquiries(Array.isArray(res) ? res : (res?.data || []));
+      }
     } catch (err) {
       console.error('Failed to load inquiries:', err);
     } finally {
@@ -94,9 +99,13 @@ export default function SaasChatScreen({ user }) {
 
     setSending(true);
     try {
-      await window.pharmacoreAPI.sendSaasReply(selectedPharmacyId, replyText.trim(), 'upgrade');
-      setReplyText('');
-      await fetchInquiries();
+      const res = await window.pharmacoreAPI.sendSaasReply(selectedPharmacyId, replyText.trim(), 'upgrade');
+      if (res && res.success === false) {
+        console.error('Failed to send reply:', res.error);
+      } else {
+        setReplyText('');
+        await fetchInquiries();
+      }
     } catch (err) {
       console.error('Failed to send reply:', err);
     } finally {

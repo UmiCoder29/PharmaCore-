@@ -57,8 +57,12 @@ export default function SaasPlansScreen({ user }) {
         window.pharmacoreAPI.getSubscriptionPlans(),
         window.pharmacoreAPI.getPlatformStats().catch(() => null)
       ]);
-      setPlans(plansData || []);
-      setStats(statsData);
+      if (plansData && plansData.success === false) {
+        setPlans([]);
+      } else {
+        setPlans(Array.isArray(plansData) ? plansData : (plansData?.data || []));
+      }
+      setStats(statsData?.data || statsData || null);
     } catch (err) {
       console.error('Error fetching plans:', err);
     } finally {

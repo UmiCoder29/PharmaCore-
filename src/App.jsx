@@ -3,6 +3,7 @@ import LoginScreen       from './components/LoginScreen.jsx';
 import OnboardingScreen  from './components/OnboardingScreen.jsx';
 import Dashboard         from './components/Dashboard.jsx';
 import LoadingDashboard  from './components/LoadingDashboard.jsx';
+import ErrorBoundary     from './components/ErrorBoundary.jsx';
 
 /**
  * Root application component (Multi-Tenant SaaS).
@@ -32,35 +33,35 @@ export default function App() {
     setAuthState('login');
   }
 
-  if (authState === 'checking') {
-    return (
-      <div className="min-h-screen bg-[#071d1a] flex items-center justify-center">
-        <div className="w-12 h-12 border-4 border-emerald/30 border-t-emerald rounded-full animate-spin"></div>
-      </div>
-    );
-  }
+  return (
+    <ErrorBoundary>
+      {authState === 'checking' && (
+        <div className="min-h-screen bg-[#071d1a] flex items-center justify-center">
+          <div className="w-12 h-12 border-4 border-emerald/30 border-t-emerald rounded-full animate-spin"></div>
+        </div>
+      )}
 
-  if (authState === 'onboarding') {
-    return (
-      <OnboardingScreen
-        onLogin={handleLogin}
-        onSwitchToLogin={() => setAuthState('login')}
-      />
-    );
-  }
+      {authState === 'onboarding' && (
+        <OnboardingScreen
+          onLogin={handleLogin}
+          onSwitchToLogin={() => setAuthState('login')}
+        />
+      )}
 
-  if (authState === 'login') {
-    return (
-      <LoginScreen
-        onLogin={handleLogin}
-        onSwitchToOnboarding={() => setAuthState('onboarding')}
-      />
-    );
-  }
+      {authState === 'login' && (
+        <LoginScreen
+          onLogin={handleLogin}
+          onSwitchToOnboarding={() => setAuthState('onboarding')}
+        />
+      )}
 
-  if (authState === 'loading-dashboard') {
-    return <LoadingDashboard onComplete={() => setAuthState('dashboard')} />;
-  }
+      {authState === 'loading-dashboard' && (
+        <LoadingDashboard onComplete={() => setAuthState('dashboard')} />
+      )}
 
-  return <Dashboard user={currentUser} onLogout={handleLogout} />;
+      {authState === 'dashboard' && (
+        <Dashboard user={currentUser} onLogout={handleLogout} />
+      )}
+    </ErrorBoundary>
+  );
 }
