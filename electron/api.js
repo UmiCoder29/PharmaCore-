@@ -196,9 +196,13 @@ export function registerAppIpcHandlers(ipcMain) {
       if (!supabase) return { success: false, error: 'Database client unavailable.' };
 
       // Fetch plan pricing dynamically from subscription_plans (no hardcoded prices)
-      const { data: plans } = await supabase
+      const { data: plans, error: plansErr } = await supabase
         .from('subscription_plans')
         .select('slug, price_monthly');
+
+      if (plansErr) {
+        return { success: false, error: plansErr.message || 'Failed to fetch subscription plans.' };
+      }
 
       // Use count queries with head: true to avoid capping at PostgREST 1000 row limit
       const [
@@ -209,7 +213,7 @@ export function registerAppIpcHandlers(ipcMain) {
         usersRes,
         branchRes,
         salesCountRes,
-        tierCounts
+        tierResults
       ] = await Promise.all([
         supabase.from('pharmacies').select('id', { count: 'exact', head: true }),
         supabase.from('pharmacies').select('id', { count: 'exact', head: true }).eq('subscription_status', 'active'),
@@ -221,17 +225,37 @@ export function registerAppIpcHandlers(ipcMain) {
         // MRR dynamically calculated per plan from subscription_plans table
         Promise.all(
           (plans || []).map(async (plan) => {
-            const { count } = await supabase
+            const res = await supabase
               .from('pharmacies')
               .select('id', { count: 'exact', head: true })
               .eq('subscription_status', 'active')
               .eq('plan_tier', plan.slug);
-            return (count || 0) * (Number(plan.price_monthly) || 0);
+            return {
+              count: res.count,
+              error: res.error,
+              priceMonthly: Number(plan.price_monthly) || 0,
+              slug: plan.slug
+            };
           })
         )
       ]);
 
-      const mrr = (tierCounts || []).reduce((sum, val) => sum + val, 0);
+      // Check errors on all count queries
+      if (totalPharmRes.error) return { success: false, error: totalPharmRes.error.message };
+      if (activePharmRes.error) return { success: false, error: activePharmRes.error.message };
+      if (trialPharmRes.error) return { success: false, error: trialPharmRes.error.message };
+      if (suspendedPharmRes.error) return { success: false, error: suspendedPharmRes.error.message };
+      if (usersRes.error) return { success: false, error: usersRes.error.message };
+      if (branchRes.error) return { success: false, error: branchRes.error.message };
+      if (salesCountRes.error) return { success: false, error: salesCountRes.error.message };
+
+      for (const tr of tierResults || []) {
+        if (tr.error) {
+          return { success: false, error: tr.error.message || `Failed to count pharmacies for plan ${tr.slug}` };
+        }
+      }
+
+      const mrr = (tierResults || []).reduce((sum, tr) => sum + ((tr.count || 0) * tr.priceMonthly), 0);
 
       // Attempt to compute total sales revenue via server-side RPC get_platform_sales_revenue.
       // If the function does not exist in the database, return null (never return 0 for uncomputed data).
@@ -273,7 +297,10 @@ export function registerAppIpcHandlers(ipcMain) {
   // Get current pharmacy tenant's subscription status & quota meters
   ipcMain.handle('pharmacy:get-current-subscription', async () => {
     const user = requireAuth();
-    const pharmacyId = user.pharmacyId || '11111111-1111-1111-1111-111111111111';
+    if (!user.pharmacyId) {
+      return { success: false, error: 'No pharmacy assigned to this account.' };
+    }
+    const pharmacyId = user.pharmacyId;
 
     let pharmData = null;
     let branchCount = 1;
@@ -641,20 +668,32 @@ export function registerAppIpcHandlers(ipcMain) {
 
   // Pharmacy: Mark inquiries as read
   ipcMain.handle('pharmacy:mark-inquiries-read', async () => {
-    const user = requireAuth();
-    if (!user.pharmacyId) return { success: true };
-
     try {
-      const dbClient = getSupabaseClient();
-      if (dbClient) {
-        await dbClient
-          .from('subscription_inquiries')
-          .update({ is_read_by_pharmacy: true })
-          .eq('pharmacy_id', user.pharmacyId);
+      const user = requireAuth();
+      if (!user.pharmacyId) {
+        return { success: false, error: 'No pharmacy assigned to this account.' };
       }
-    } catch (_) {}
 
-    return { success: true };
+      const dbClient = getSupabaseClient();
+      if (!dbClient) {
+        return { success: false, error: 'Database client not initialized.' };
+      }
+
+      const { error } = await dbClient
+        .from('subscription_inquiries')
+        .update({ is_read_by_pharmacy: true })
+        .eq('pharmacy_id', user.pharmacyId);
+
+      if (error) {
+        console.error('[API] Failed to mark inquiries read:', error.message);
+        return { success: false, error: error.message };
+      }
+
+      return { success: true };
+    } catch (err) {
+      console.error('[API] mark-inquiries-read error:', err.message);
+      return { success: false, error: err.message || 'Failed to mark inquiries read.' };
+    }
   });
 
   // ============================================================================
@@ -926,7 +965,10 @@ export function registerAppIpcHandlers(ipcMain) {
   // Pharmacy: Update branding & store profile (Name, Logo URL/Data, City, Address, Phone, Tax Number)
   ipcMain.handle('pharmacy:update-branding', async (_event, brandingData) => {
     const user = requireAuth();
-    const pharmacyId = user.pharmacyId || '11111111-1111-1111-1111-111111111111';
+    if (!user.pharmacyId) {
+      return { success: false, error: 'No pharmacy assigned to this account.' };
+    }
+    const pharmacyId = user.pharmacyId;
 
     const payload = {};
     if (brandingData.name !== undefined) payload.name = brandingData.name.trim();

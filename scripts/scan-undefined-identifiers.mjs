@@ -73,3 +73,7 @@ for (const file of files) {
 }
 
 console.log(JSON.stringify(issues, null, 2));
+
+if (issues.length > 0) {
+  process.exit(1);
+}
