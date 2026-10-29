@@ -14,7 +14,8 @@ import {
   CreditCard,
   Building,
   CheckCircle2,
-  Calendar
+  Calendar,
+  AlertCircle
 } from 'lucide-react';
 
 export default function SaasChatScreen({ user }) {
@@ -23,21 +24,34 @@ export default function SaasChatScreen({ user }) {
   const [replyText, setReplyText] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState('all'); // all, upgrade, billing
   const messagesEndRef = useRef(null);
+
+  const lastPollErrorRef = useRef('');
 
   const fetchInquiries = async () => {
     try {
       const res = await window.pharmacoreAPI.getSaasInquiries();
       if (res && res.success === false) {
-        console.error('Failed to load inquiries:', res.error);
+        if (lastPollErrorRef.current !== res.error) {
+          lastPollErrorRef.current = res.error;
+          console.error('[SaasChat] Failed to load inquiries:', res.error);
+        }
+        setLoadError(res.error || 'Failed to load inquiries.');
         setInquiries([]);
       } else {
+        lastPollErrorRef.current = '';
+        setLoadError('');
         setInquiries(Array.isArray(res) ? res : (res?.data || []));
       }
     } catch (err) {
-      console.error('Failed to load inquiries:', err);
+      if (lastPollErrorRef.current !== err.message) {
+        lastPollErrorRef.current = err.message;
+        console.error('[SaasChat] Error polling inquiries:', err.message);
+      }
+      setLoadError(err.message || 'Error loading inquiries.');
     } finally {
       setLoading(false);
     }
@@ -184,6 +198,21 @@ export default function SaasChatScreen({ user }) {
           <span>Refresh Messages</span>
         </button>
       </div>
+
+      {loadError && (
+        <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold rounded-xl flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{loadError}</span>
+          </div>
+          <button 
+            onClick={() => { setLoadError(''); fetchInquiries(); }}
+            className="text-xs text-rose-700 underline font-semibold ml-2 hover:text-rose-900"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Main Split Chat Layout */}
       <div className="flex-1 bg-white rounded-3xl border border-ink/10 shadow-sm overflow-hidden grid grid-cols-1 md:grid-cols-12">

@@ -92,6 +92,7 @@ export default function Dashboard({ user, onLogout }) {
     return () => clearInterval(timer);
   }, []);
 
+  const lastStatusErrorRef = useRef('');
   // Poll connection & public broadcast config
   useEffect(() => {
     const checkStatus = async () => {
@@ -100,6 +101,7 @@ export default function Dashboard({ user, onLogout }) {
           window.pharmacoreAPI.getConnectionStatus(),
           window.pharmacoreAPI.getPublicConfig().catch(() => null)
         ]);
+        lastStatusErrorRef.current = '';
         setConnection(conn);
         setPublicConfig(config);
         if (config?.broadcast && config.broadcast.enabled) {
@@ -108,7 +110,10 @@ export default function Dashboard({ user, onLogout }) {
           setBroadcast(null);
         }
       } catch (e) {
-        console.error('Failed to get status', e);
+        if (lastStatusErrorRef.current !== e.message) {
+          lastStatusErrorRef.current = e.message;
+          console.error('[Dashboard] Failed to get status:', e.message);
+        }
       }
     };
     checkStatus();
@@ -116,15 +121,30 @@ export default function Dashboard({ user, onLogout }) {
     return () => clearInterval(interval);
   }, []);
 
+  const lastInquiryErrorRef = useRef('');
   // SuperAdmin: Poll unread upgrade chat messages
   useEffect(() => {
     if (!isSuperAdmin) return;
     const fetchUnread = async () => {
       try {
         const inquiries = await window.pharmacoreAPI.getSaasInquiries();
-        const unread = (inquiries || []).filter(i => !i.isReadBySuperadmin && i.senderRole !== 'superadmin').length;
+        if (inquiries && inquiries.success === false) {
+          if (lastInquiryErrorRef.current !== inquiries.error) {
+            lastInquiryErrorRef.current = inquiries.error;
+            console.error('[Dashboard] Failed to fetch unread inquiries:', inquiries.error);
+          }
+          return;
+        }
+        lastInquiryErrorRef.current = '';
+        const list = Array.isArray(inquiries) ? inquiries : (inquiries?.data || []);
+        const unread = list.filter(i => !i.isReadBySuperadmin && i.senderRole !== 'superadmin').length;
         setUnreadInquiryCount(unread);
-      } catch (_) {}
+      } catch (err) {
+        if (lastInquiryErrorRef.current !== err.message) {
+          lastInquiryErrorRef.current = err.message;
+          console.error('[Dashboard] Error polling unread inquiries:', err.message);
+        }
+      }
     };
     fetchUnread();
     const interval = setInterval(fetchUnread, 5000);

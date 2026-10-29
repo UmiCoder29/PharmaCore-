@@ -27,17 +27,32 @@ export default function SupportChatWidget({ user }) {
 
   const isSuperAdmin = user?.role === 'superadmin';
 
+  const lastFetchErrorRef = useRef('');
+
   const fetchMessages = async () => {
     if (!user?.pharmacyId || isSuperAdmin) return;
     try {
       const history = await window.pharmacoreAPI.getPharmacyInquiries();
-      const list = history || [];
+      if (history && history.success === false) {
+        if (lastFetchErrorRef.current !== history.error) {
+          lastFetchErrorRef.current = history.error;
+          console.error('[SupportChat] Failed to fetch inquiries:', history.error);
+        }
+        return;
+      }
+      lastFetchErrorRef.current = '';
+      const list = Array.isArray(history) ? history : (history?.data || []);
       setMessages(list);
 
       // Unread count for pharmacy
       const unread = list.filter(m => !m.isReadByPharmacy && m.senderRole === 'superadmin').length;
       setUnreadCount(unread);
-    } catch (_) {}
+    } catch (err) {
+      if (lastFetchErrorRef.current !== err.message) {
+        lastFetchErrorRef.current = err.message;
+        console.error('[SupportChat] Error fetching messages:', err.message);
+      }
+    }
   };
 
   useEffect(() => {
@@ -50,8 +65,17 @@ export default function SupportChatWidget({ user }) {
     if (isOpen) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       if (unreadCount > 0) {
-        window.pharmacoreAPI.markPharmacyInquiriesRead().catch(() => {});
-        setUnreadCount(0);
+        window.pharmacoreAPI.markPharmacyInquiriesRead()
+          .then(res => {
+            if (res && res.success === false) {
+              console.error('[SupportChat] Error marking inquiries read:', res.error);
+              return;
+            }
+            setUnreadCount(0);
+          })
+          .catch(err => {
+            console.error('[SupportChat] Error marking inquiries read:', err.message || err);
+          });
       }
     }
   }, [isOpen, messages]);

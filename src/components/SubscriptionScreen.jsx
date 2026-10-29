@@ -50,35 +50,53 @@ export default function SubscriptionScreen({ user, onBrandingUpdated }) {
   const [savingBranding, setSavingBranding] = useState(false);
   const [brandingSuccess, setBrandingSuccess] = useState('');
   const [brandingError, setBrandingError] = useState('');
+  const [loadError, setLoadError] = useState('');
   const brandingLoadedRef = useRef(false);
+
+  const lastPollErrorRef = useRef('');
 
   const fetchSubAndChat = async (isInitial = false) => {
     try {
       const [sub, msgs, plansData, config] = await Promise.all([
-        window.pharmacoreAPI.getCurrentSubscription(),
+        window.pharmacoreAPI.getCurrentSubscription().catch(err => ({ success: false, error: err.message })),
         window.pharmacoreAPI.getPharmacyInquiries().catch(() => []),
         window.pharmacoreAPI.getSubscriptionPlans().catch(() => []),
         window.pharmacoreAPI.getPublicConfig().catch(() => null)
       ]);
-      setSubData(sub);
+
+      if (sub && sub.success === false) {
+        if (lastPollErrorRef.current !== sub.error) {
+          lastPollErrorRef.current = sub.error;
+          console.error('[SubscriptionScreen] Failed to load subscription:', sub.error);
+        }
+        setLoadError(sub.error || 'Failed to load subscription data.');
+      } else {
+        lastPollErrorRef.current = '';
+        setLoadError('');
+        setSubData(sub);
+        if (sub && (!brandingLoadedRef.current || isInitial)) {
+          setBranding({
+            name: sub.name || user?.pharmacyName || '',
+            logoUrl: sub.logoUrl || user?.pharmacyLogo || '',
+            city: sub.city || '',
+            address: sub.address || '',
+            contactPhone: sub.contactPhone || '',
+            contactEmail: sub.contactEmail || '',
+            taxNumber: sub.taxNumber || ''
+          });
+          brandingLoadedRef.current = true;
+        }
+      }
+
       setInquiries(msgs || []);
       setPlans(plansData || []);
       setPublicConfig(config);
-
-      if (sub && (!brandingLoadedRef.current || isInitial)) {
-        setBranding({
-          name: sub.name || user?.pharmacyName || '',
-          logoUrl: sub.logoUrl || user?.pharmacyLogo || '',
-          city: sub.city || '',
-          address: sub.address || '',
-          contactPhone: sub.contactPhone || '',
-          contactEmail: sub.contactEmail || '',
-          taxNumber: sub.taxNumber || ''
-        });
-        brandingLoadedRef.current = true;
-      }
     } catch (err) {
-      console.error('Failed to load subscription & chat:', err);
+      if (lastPollErrorRef.current !== err.message) {
+        lastPollErrorRef.current = err.message;
+        console.error('[SubscriptionScreen] Error polling subscription & chat:', err.message);
+      }
+      setLoadError(err.message || 'Error loading subscription data.');
     } finally {
       setLoading(false);
     }
@@ -170,6 +188,21 @@ export default function SubscriptionScreen({ user, onBrandingUpdated }) {
 
   return (
     <div className="space-y-6 max-w-6xl mx-auto pb-12">
+      {loadError && (
+        <div className="p-4 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold rounded-2xl flex items-center justify-between shadow-sm">
+          <div className="flex items-center gap-2.5">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{loadError}</span>
+          </div>
+          <button
+            onClick={() => { setLoadError(''); fetchSubAndChat(true); }}
+            className="text-xs text-rose-700 underline font-semibold ml-2 hover:text-rose-900"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Top Banner */}
       <div className="bg-gradient-to-br from-[#071d1a] via-[#0b2b26] to-[#0e3b33] rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
