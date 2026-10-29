@@ -5,6 +5,9 @@
   "author": "PharmaCore",
   "main": "main.js",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "concurrently -k -n \"vite,electron\" -c \"cyan,magenta\" \"npm run vite:dev\" \"npm run electron:dev\"",
     "vite:dev": "vite",
