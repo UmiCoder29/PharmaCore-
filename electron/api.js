@@ -1598,7 +1598,10 @@ export function registerAppIpcHandlers(ipcMain) {
 
   // Start periodic expiry check
   console.log('[api] Starting hourly expiry check schedule');
-  setInterval(() => {
+  const expiryTimer = setInterval(() => {
     runExpiryCheck().catch(err => console.error('[api] Expiry check failed:', err.message));
   }, 60 * 60 * 1000);
+  if (expiryTimer?.unref) {
+    expiryTimer.unref();
+  }
 }

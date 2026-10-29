@@ -47,6 +47,9 @@ export function startPing() {
     }
     pingSupabase();
     _pingInterval = setInterval(pingSupabase, 10000);
+    if (_pingInterval?.unref) {
+        _pingInterval.unref();
+    }
 }
 
 export function stopPing() {
