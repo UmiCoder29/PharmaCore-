@@ -95,6 +95,13 @@ export function clearSupabase() {
 }
 
 /**
+ * Injects a mock client for unit testing auth & IPC handlers without network.
+ */
+export function _setSupabaseClientForTesting(client) {
+    _supabaseClient = client;
+}
+
+/**
  * Service role keys are removed from the desktop app for security.
  * Administrative operations are to be handled via Supabase Edge Functions.
  */

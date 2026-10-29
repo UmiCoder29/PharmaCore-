@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import { Notification } from 'electron';
 import {
   addRecord,
   updateRecord,
@@ -12,11 +11,10 @@ import {
 } from './db.js';
 import { 
   getSupabaseClient, 
-  getConnectionStatus, 
-  getAdminClient
+  getConnectionStatus
 } from './supabaseClient.js';
 import { getCacheData, setCacheData } from './localCache.js';
-import { getCurrentUser, updateCurrentUserPharmacyBranding } from './auth.js';
+import { getCurrentUser, updateCurrentUserPharmacyBranding, registerPharmacy } from './auth.js';
 
 /**
  * Converts snake_case object keys to camelCase.
@@ -65,7 +63,7 @@ function requireAdmin() {
  * @returns {Object} The current superadmin user.
  * @throws {Error} If user is not superadmin.
  */
-function requireSuperAdmin() {
+export function requireSuperAdmin() {
   const user = requireAuth();
   if (user.role !== 'superadmin') {
     throw new Error('Forbidden: SaaS Platform SuperAdmin access required.');
@@ -84,57 +82,61 @@ export function registerAppIpcHandlers(ipcMain) {
 
   // Get all registered pharmacies (Tenants)
   ipcMain.handle('saas:get-pharmacies', async () => {
-    requireSuperAdmin();
     try {
-      const adminClient = getAdminClient();
-      if (!adminClient) throw new Error('Admin client not initialized.');
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-      const { data: pharmacies, error: pharmErr } = await adminClient
+      const { data: pharmacies, error: pharmErr } = await supabase
         .from('pharmacies')
         .select('*')
         .order('created_at', { ascending: false });
 
-      if (pharmErr) throw pharmErr;
+      if (pharmErr) return { success: false, error: pharmErr.message };
 
-      // Enrich with branch, user, and sales counts
+      // Enrich with branch, user, and sales counts using count queries (no row fetching)
       const enriched = await Promise.all(
         (pharmacies || []).map(async (pharm) => {
           const [branchesRes, usersRes, salesRes] = await Promise.all([
-            adminClient.from('branches').select('id', { count: 'exact', head: true }).eq('pharmacy_id', pharm.id),
-            adminClient.from('app_users').select('id', { count: 'exact', head: true }).eq('pharmacy_id', pharm.id),
-            adminClient.from('sales').select('total_amount').eq('pharmacy_id', pharm.id)
+            supabase.from('branches').select('id', { count: 'exact', head: true }).eq('pharmacy_id', pharm.id),
+            supabase.from('app_users').select('id', { count: 'exact', head: true }).eq('pharmacy_id', pharm.id),
+            supabase.from('sales').select('id', { count: 'exact', head: true }).eq('pharmacy_id', pharm.id)
           ]);
-
-          const totalRevenue = (salesRes.data || []).reduce((acc, s) => acc + (parseFloat(s.total_amount) || 0), 0);
 
           return {
             ...toCamelCase(pharm),
             branchCount: branchesRes.count || 0,
             userCount: usersRes.count || 0,
-            totalSalesVolume: totalRevenue
+            salesCount: salesRes.count || 0,
+            totalSalesVolume: 0 // Do not total from fetched rows (PostgREST limit)
           };
         })
       );
 
-      return enriched;
+      return { success: true, data: enriched };
     } catch (error) {
       console.error('[SaaS API] Error getting pharmacies:', error);
-      throw new Error(error.message || JSON.stringify(error));
+      return { success: false, error: error.message || 'Failed to get pharmacies.' };
     }
   });
 
   // Provision new pharmacy tenant manually
   ipcMain.handle('saas:create-pharmacy', async (_event, pharmacyData) => {
-    requireSuperAdmin();
-    return await registerPharmacy(pharmacyData);
+    try {
+      requireSuperAdmin();
+      return await registerPharmacy(pharmacyData);
+    } catch (error) {
+      console.error('[SaaS API] Error creating pharmacy:', error);
+      return { success: false, error: error.message || 'Failed to create pharmacy tenant.' };
+    }
   });
 
   // Update a pharmacy's subscription, plan, validity or quotas
   ipcMain.handle('saas:update-pharmacy-subscription', async (_event, { pharmacyId, updates }) => {
-    requireSuperAdmin();
     try {
-      const adminClient = getAdminClient();
-      if (!adminClient) throw new Error('Admin client unavailable.');
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client unavailable.' };
 
       const payload = {};
       if (updates.planTier !== undefined) payload.plan_tier = updates.planTier;
@@ -145,27 +147,29 @@ export function registerAppIpcHandlers(ipcMain) {
       if (updates.isActive !== undefined) payload.is_active = updates.isActive;
       payload.updated_at = new Date().toISOString();
 
-      const { data, error } = await adminClient
+      const { data, error } = await supabase
         .from('pharmacies')
         .update(payload)
         .eq('id', pharmacyId)
         .select()
         .single();
 
-      if (error) throw error;
-      return toCamelCase(data);
+      if (error) return { success: false, error: error.message };
+      return { success: true, data: toCamelCase(data) };
     } catch (error) {
       console.error('[SaaS API] Error updating subscription:', error);
-      throw new Error(error.message || JSON.stringify(error));
+      return { success: false, error: error.message || 'Failed to update subscription.' };
     }
   });
 
   // Toggle active / suspend pharmacy tenant
   ipcMain.handle('saas:toggle-pharmacy-status', async (_event, { pharmacyId, status }) => {
-    requireSuperAdmin();
     try {
-      const adminClient = getAdminClient();
-      const { data, error } = await adminClient
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client unavailable.' };
+
+      const { data, error } = await supabase
         .from('pharmacies')
         .update({
           subscription_status: status,
@@ -176,59 +180,89 @@ export function registerAppIpcHandlers(ipcMain) {
         .select()
         .single();
 
-      if (error) throw error;
-      return toCamelCase(data);
+      if (error) return { success: false, error: error.message };
+      return { success: true, data: toCamelCase(data) };
     } catch (error) {
       console.error('[SaaS API] Error toggling status:', error);
-      throw new Error(error.message || JSON.stringify(error));
+      return { success: false, error: error.message || 'Failed to toggle status.' };
     }
   });
 
   // Platform-wide metrics for SaaS Owner Dashboard
   ipcMain.handle('saas:get-platform-stats', async () => {
-    requireSuperAdmin();
     try {
-      const adminClient = getAdminClient();
-      if (!adminClient) throw new Error('Admin client unavailable.');
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client unavailable.' };
 
-      const [pharmRes, usersRes, branchRes, salesRes] = await Promise.all([
-        adminClient.from('pharmacies').select('*'),
-        adminClient.from('app_users').select('id', { count: 'exact', head: true }),
-        adminClient.from('branches').select('id', { count: 'exact', head: true }),
-        adminClient.from('sales').select('total_amount, created_at')
+      // Fetch plan pricing dynamically from subscription_plans (no hardcoded prices)
+      const { data: plans } = await supabase
+        .from('subscription_plans')
+        .select('slug, price_monthly');
+
+      // Use count queries with head: true to avoid capping at PostgREST 1000 row limit
+      const [
+        totalPharmRes,
+        activePharmRes,
+        trialPharmRes,
+        suspendedPharmRes,
+        usersRes,
+        branchRes,
+        salesCountRes,
+        tierCounts
+      ] = await Promise.all([
+        supabase.from('pharmacies').select('id', { count: 'exact', head: true }),
+        supabase.from('pharmacies').select('id', { count: 'exact', head: true }).eq('subscription_status', 'active'),
+        supabase.from('pharmacies').select('id', { count: 'exact', head: true }).eq('subscription_status', 'trial'),
+        supabase.from('pharmacies').select('id', { count: 'exact', head: true }).in('subscription_status', ['suspended', 'past_due', 'cancelled']),
+        supabase.from('app_users').select('id', { count: 'exact', head: true }),
+        supabase.from('branches').select('id', { count: 'exact', head: true }),
+        supabase.from('sales').select('id', { count: 'exact', head: true }),
+        // MRR dynamically calculated per plan from subscription_plans table
+        Promise.all(
+          (plans || []).map(async (plan) => {
+            const { count } = await supabase
+              .from('pharmacies')
+              .select('id', { count: 'exact', head: true })
+              .eq('subscription_status', 'active')
+              .eq('plan_tier', plan.slug);
+            return (count || 0) * (Number(plan.price_monthly) || 0);
+          })
+        )
       ]);
 
-      const pharmacies = pharmRes.data || [];
-      const totalPharmacies = pharmacies.length;
-      const activeSubscriptions = pharmacies.filter(p => p.subscription_status === 'active').length;
-      const trialSubscriptions = pharmacies.filter(p => p.subscription_status === 'trial').length;
-      const suspendedSubscriptions = pharmacies.filter(p => ['suspended', 'past_due', 'cancelled'].includes(p.subscription_status)).length;
+      const mrr = (tierCounts || []).reduce((sum, val) => sum + val, 0);
 
-      // Estimated Monthly Recurring Revenue based on active plan tiers
-      const mrr = pharmacies.reduce((sum, p) => {
-        if (p.subscription_status !== 'active') return sum;
-        if (p.plan_tier === 'starter') return sum + 3000;
-        if (p.plan_tier === 'professional') return sum + 8000;
-        if (p.plan_tier === 'enterprise') return sum + 20000;
-        return sum;
-      }, 0);
-
-      const totalSalesRevenue = (salesRes.data || []).reduce((acc, s) => acc + (parseFloat(s.total_amount) || 0), 0);
+      // Attempt to compute total sales revenue via server-side RPC get_platform_sales_revenue.
+      // If the function does not exist in the database, return null (never return 0 for uncomputed data).
+      let totalSalesRevenue = null;
+      try {
+        const { data: revData, error: revErr } = await supabase.rpc('get_platform_sales_revenue');
+        if (!revErr && revData !== null && revData !== undefined) {
+          totalSalesRevenue = Number(revData);
+        }
+      } catch {
+        totalSalesRevenue = null;
+      }
 
       return {
-        totalPharmacies,
-        activeSubscriptions,
-        trialSubscriptions,
-        suspendedSubscriptions,
-        totalUsers: usersRes.count || 0,
-        totalBranches: branchRes.count || 0,
-        totalSalesRevenue,
-        estimatedMRR: mrr,
-        currency: 'PKR'
+        success: true,
+        data: {
+          totalPharmacies: totalPharmRes.count || 0,
+          activeSubscriptions: activePharmRes.count || 0,
+          trialSubscriptions: trialPharmRes.count || 0,
+          suspendedSubscriptions: suspendedPharmRes.count || 0,
+          totalUsers: usersRes.count || 0,
+          totalBranches: branchRes.count || 0,
+          totalSalesCount: salesCountRes.count || 0,
+          totalSalesRevenue, // null if function does not exist yet; UI displays "Not available yet"
+          estimatedMRR: mrr,
+          currency: 'PKR'
+        }
       };
     } catch (error) {
       console.error('[SaaS API] Error calculating platform stats:', error);
-      throw new Error(error.message || JSON.stringify(error));
+      return { success: false, error: error.message || 'Failed to calculate platform stats.' };
     }
   });
 
@@ -246,8 +280,7 @@ export function registerAppIpcHandlers(ipcMain) {
     let userCount = 1;
 
     try {
-      const adminClient = getAdminClient();
-      const dbClient = adminClient || getSupabaseClient();
+      const dbClient = getSupabaseClient();
 
       if (dbClient) {
         const { data: pharm, error: pharmErr } = await dbClient
@@ -309,7 +342,8 @@ export function registerAppIpcHandlers(ipcMain) {
     if (!user.pharmacyId) throw new Error('No pharmacy associated with user.');
 
     try {
-      const dbClient = getAdminClient() || getSupabaseClient();
+      const dbClient = getSupabaseClient();
+      if (!dbClient) throw new Error('Database client unavailable.');
       const payload = {};
       if (updates.name !== undefined) payload.name = updates.name.trim();
       if (updates.contactEmail !== undefined) payload.contact_email = updates.contactEmail.trim();
@@ -466,96 +500,83 @@ export function registerAppIpcHandlers(ipcMain) {
 
   // SuperAdmin: Get all upgrade inquiries / chat messages across all pharmacies
   ipcMain.handle('saas:get-inquiries', async () => {
-    requireSuperAdmin();
-    let remoteList = [];
     try {
-      const adminClient = getAdminClient();
-      if (adminClient) {
-        const { data, error } = await adminClient
-          .from('subscription_inquiries')
-          .select('*, pharmacies(id, name, slug, contact_phone, contact_email, plan_tier, subscription_status)')
-          .order('created_at', { ascending: true });
-        if (!error && data) {
-          remoteList = data.map(row => ({
-            ...toCamelCase(row),
-            pharmacy: row.pharmacies ? toCamelCase(row.pharmacies) : null
-          }));
-        }
-      }
-    } catch (_) {}
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-    const localList = getLocalInquiries();
-    const map = new Map();
-    [...remoteList, ...localList].forEach(item => {
-      map.set(item.id, item);
-    });
+      const { data, error } = await supabase
+        .from('subscription_inquiries')
+        .select('*, pharmacies(id, name, slug, contact_phone, contact_email, plan_tier, subscription_status)')
+        .order('created_at', { ascending: true });
 
-    const merged = Array.from(map.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-    return merged;
+      if (error) return { success: false, error: error.message };
+
+      const list = (data || []).map(row => ({
+        ...toCamelCase(row),
+        pharmacy: row.pharmacies ? toCamelCase(row.pharmacies) : null
+      }));
+
+      return { success: true, data: list };
+    } catch (err) {
+      console.error('[SaaS API] Error getting inquiries:', err);
+      return { success: false, error: err.message || 'Failed to get inquiries.' };
+    }
   });
 
   // SuperAdmin: Send reply message to a pharmacy
   ipcMain.handle('saas:send-reply', async (_event, { pharmacyId, message, inquiryType = 'general' }) => {
-    const user = requireSuperAdmin();
-    const newMsg = {
-      id: crypto.randomUUID(),
-      pharmacyId,
-      senderId: user.id,
-      senderName: user.name || 'Platform Support',
-      senderRole: 'superadmin',
-      message: message.trim(),
-      inquiryType: inquiryType || 'general',
-      requestedPlan: null,
-      isReadBySuperadmin: true,
-      isReadByPharmacy: false,
-      createdAt: new Date().toISOString()
-    };
-
-    saveLocalInquiry(newMsg);
-
     try {
-      const adminClient = getAdminClient();
-      if (adminClient) {
-        await adminClient.from('subscription_inquiries').insert([{
-          id: newMsg.id,
-          pharmacy_id: newMsg.pharmacyId,
-          sender_id: newMsg.senderId,
-          sender_name: newMsg.senderName,
-          sender_role: newMsg.senderRole,
-          message: newMsg.message,
-          inquiry_type: newMsg.inquiryType,
-          is_read_by_superadmin: true,
-          is_read_by_pharmacy: false,
-          created_at: newMsg.createdAt
-        }]);
-      }
-    } catch (err) {
-      console.warn('[SaaS API] Supabase reply fallback to local store:', err.message);
-    }
+      const user = requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-    return newMsg;
+      const newMsg = {
+        id: crypto.randomUUID(),
+        pharmacy_id: pharmacyId,
+        sender_id: user.id,
+        sender_name: user.name || 'Platform Support',
+        sender_role: 'superadmin',
+        message: message.trim(),
+        inquiry_type: inquiryType || 'general',
+        requested_plan: null,
+        is_read_by_superadmin: true,
+        is_read_by_pharmacy: false,
+        created_at: new Date().toISOString()
+      };
+
+      const { data, error } = await supabase
+        .from('subscription_inquiries')
+        .insert([newMsg])
+        .select()
+        .single();
+
+      if (error) return { success: false, error: error.message };
+      return { success: true, data: toCamelCase(data) };
+    } catch (err) {
+      console.error('[SaaS API] Error sending reply:', err);
+      return { success: false, error: err.message || 'Failed to send reply.' };
+    }
   });
 
   // SuperAdmin: Mark inquiries from a pharmacy as read
   ipcMain.handle('saas:mark-inquiries-read', async (_event, pharmacyId) => {
-    requireSuperAdmin();
-    const localList = getLocalInquiries();
-    localList.forEach(m => {
-      if (m.pharmacyId === pharmacyId) m.isReadBySuperadmin = true;
-    });
-    setCacheData('subscription_inquiries', localList);
-
     try {
-      const adminClient = getAdminClient();
-      if (adminClient) {
-        await adminClient
-          .from('subscription_inquiries')
-          .update({ is_read_by_superadmin: true })
-          .eq('pharmacy_id', pharmacyId);
-      }
-    } catch (_) {}
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-    return { success: true };
+      const { error } = await supabase
+        .from('subscription_inquiries')
+        .update({ is_read_by_superadmin: true })
+        .eq('pharmacy_id', pharmacyId);
+
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } catch (err) {
+      console.error('[SaaS API] Error marking inquiries read:', err);
+      return { success: false, error: err.message || 'Failed to mark inquiries read.' };
+    }
   });
 
   // Pharmacy: Get conversation history with SuperAdmin
@@ -563,10 +584,8 @@ export function registerAppIpcHandlers(ipcMain) {
     const user = requireAuth();
     if (!user.pharmacyId) return [];
 
-    let remoteList = [];
     try {
-      const adminClient = getAdminClient();
-      const dbClient = adminClient || getSupabaseClient();
+      const dbClient = getSupabaseClient();
       if (dbClient) {
         const { data, error } = await dbClient
           .from('subscription_inquiries')
@@ -574,19 +593,13 @@ export function registerAppIpcHandlers(ipcMain) {
           .eq('pharmacy_id', user.pharmacyId)
           .order('created_at', { ascending: true });
         if (!error && data) {
-          remoteList = data.map(r => toCamelCase(r));
+          return data.map(r => toCamelCase(r));
         }
       }
-    } catch (_) {}
-
-    const localList = getLocalInquiries().filter(m => m.pharmacyId === user.pharmacyId);
-    const map = new Map();
-    [...remoteList, ...localList].forEach(item => {
-      map.set(item.id, item);
-    });
-
-    const merged = Array.from(map.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-    return merged;
+    } catch (err) {
+      console.warn('[Pharmacy API] Error getting inquiries:', err.message);
+    }
+    return [];
   });
 
   // Pharmacy: Send inquiry or upgrade message to SuperAdmin (Free for all users)
@@ -596,45 +609,34 @@ export function registerAppIpcHandlers(ipcMain) {
 
     const newMsg = {
       id: crypto.randomUUID(),
-      pharmacyId: user.pharmacyId,
-      senderId: user.id,
-      senderName: user.name || user.username,
-      senderRole: user.role,
+      pharmacy_id: user.pharmacyId,
+      sender_id: user.id,
+      sender_name: user.name || user.username,
+      sender_role: user.role,
       message: message.trim(),
-      inquiryType: inquiryType || 'general',
-      requestedPlan: requestedPlan || null,
-      isReadBySuperadmin: false,
-      isReadByPharmacy: true,
-      createdAt: new Date().toISOString()
+      inquiry_type: inquiryType || 'general',
+      requested_plan: requestedPlan || null,
+      is_read_by_superadmin: false,
+      is_read_by_pharmacy: true,
+      created_at: new Date().toISOString()
     };
 
-    // Save in local persistent cache immediately
-    saveLocalInquiry(newMsg);
-
-    // Also attempt saving to remote Supabase if available
-    try {
-      const adminClient = getAdminClient();
-      const dbClient = adminClient || getSupabaseClient();
-      if (dbClient) {
-        await dbClient.from('subscription_inquiries').insert([{
-          id: newMsg.id,
-          pharmacy_id: newMsg.pharmacyId,
-          sender_id: newMsg.senderId,
-          sender_name: newMsg.senderName,
-          sender_role: newMsg.senderRole,
-          message: newMsg.message,
-          inquiry_type: newMsg.inquiryType,
-          requested_plan: newMsg.requestedPlan,
-          is_read_by_superadmin: false,
-          is_read_by_pharmacy: true,
-          created_at: newMsg.createdAt
-        }]);
+    const dbClient = getSupabaseClient();
+    if (dbClient) {
+      const { data, error } = await dbClient
+        .from('subscription_inquiries')
+        .insert([newMsg])
+        .select()
+        .single();
+      if (!error && data) {
+        return toCamelCase(data);
       }
-    } catch (err) {
-      console.warn('[Pharmacy API] Supabase inquiry stored locally:', err.message);
+      if (error) {
+        throw new Error(error.message);
+      }
     }
 
-    return newMsg;
+    return toCamelCase(newMsg);
   });
 
   // Pharmacy: Mark inquiries as read
@@ -642,15 +644,8 @@ export function registerAppIpcHandlers(ipcMain) {
     const user = requireAuth();
     if (!user.pharmacyId) return { success: true };
 
-    const localList = getLocalInquiries();
-    localList.forEach(m => {
-      if (m.pharmacyId === user.pharmacyId) m.isReadByPharmacy = true;
-    });
-    setCacheData('subscription_inquiries', localList);
-
     try {
-      const adminClient = getAdminClient();
-      const dbClient = adminClient || getSupabaseClient();
+      const dbClient = getSupabaseClient();
       if (dbClient) {
         await dbClient
           .from('subscription_inquiries')
@@ -668,164 +663,123 @@ export function registerAppIpcHandlers(ipcMain) {
 
   // Get all subscription plans
   ipcMain.handle('saas:get-plans', async () => {
-    const user = getCurrentUser();
-    const isSuperAdmin = user?.role === 'superadmin';
-
-    let remotePlans = [];
     try {
-      const adminClient = getAdminClient();
-      const dbClient = adminClient || getSupabaseClient();
-      if (dbClient) {
-        let query = dbClient.from('subscription_plans').select('*');
-        if (!isSuperAdmin) {
-          query = query.eq('is_active', true);
-        }
-        query = query.order('sort_order', { ascending: true }).order('price_monthly', { ascending: true });
+      const user = getCurrentUser();
+      const isSuperAdmin = user?.role === 'superadmin';
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) {
-          remotePlans = data.map(r => toCamelCase(r));
-        }
+      let query = supabase.from('subscription_plans').select('*');
+      if (!isSuperAdmin) {
+        query = query.eq('is_active', true);
       }
-    } catch (_) {}
+      query = query.order('sort_order', { ascending: true }).order('price_monthly', { ascending: true });
 
-    const localPlans = getLocalPlans();
-    const map = new Map();
-    [...DEFAULT_PLANS, ...localPlans, ...remotePlans].forEach(p => {
-      map.set(p.slug, p);
-    });
+      const { data, error } = await query;
+      if (error) return { success: false, error: error.message };
 
-    let allPlans = Array.from(map.values());
-    if (!isSuperAdmin) {
-      allPlans = allPlans.filter(p => p.isActive !== false);
+      const plans = (data || []).map(r => toCamelCase(r));
+      return { success: true, data: plans };
+    } catch (err) {
+      console.error('[SaaS API] Error getting plans:', err);
+      return { success: false, error: err.message || 'Failed to get plans.' };
     }
-    allPlans.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0) || (a.priceMonthly || 0) - (b.priceMonthly || 0));
-    return allPlans;
   });
 
   // Create new subscription plan
   ipcMain.handle('saas:create-plan', async (_event, planData) => {
-    requireSuperAdmin();
-    const slug = (planData.slug || planData.name || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
-    const newPlan = {
-      id: crypto.randomUUID(),
-      name: planData.name.trim(),
-      slug,
-      description: planData.description?.trim() || null,
-      priceMonthly: parseFloat(planData.priceMonthly) || 0,
-      priceAnnual: parseFloat(planData.priceAnnual) || 0,
-      currency: planData.currency || 'PKR',
-      maxBranches: parseInt(planData.maxBranches, 10) || 1,
-      maxUsers: parseInt(planData.maxUsers, 10) || 3,
-      features: Array.isArray(planData.features) ? planData.features : (planData.features || '').split('\n').filter(Boolean),
-      badge: planData.badge?.trim() || null,
-      isPublic: planData.isPublic !== false,
-      isActive: planData.isActive !== false,
-      sortOrder: parseInt(planData.sortOrder, 10) || 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    saveLocalPlan(newPlan);
-
     try {
-      const adminClient = getAdminClient();
-      if (adminClient) {
-        await adminClient.from('subscription_plans').insert([{
-          id: newPlan.id,
-          name: newPlan.name,
-          slug: newPlan.slug,
-          description: newPlan.description,
-          price_monthly: newPlan.priceMonthly,
-          price_annual: newPlan.priceAnnual,
-          currency: newPlan.currency,
-          max_branches: newPlan.maxBranches,
-          max_users: newPlan.maxUsers,
-          features: newPlan.features,
-          badge: newPlan.badge,
-          is_public: newPlan.isPublic,
-          is_active: newPlan.isActive,
-          sort_order: newPlan.sortOrder,
-          updated_at: newPlan.updatedAt
-        }]);
-      }
-    } catch (err) {
-      console.warn('[SaaS API] Plan created in local store:', err.message);
-    }
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-    return { success: true, plan: newPlan };
+      const slug = (planData.slug || planData.name || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+      const newPlan = {
+        id: crypto.randomUUID(),
+        name: planData.name.trim(),
+        slug,
+        description: planData.description?.trim() || null,
+        price_monthly: parseFloat(planData.priceMonthly) || 0,
+        price_annual: parseFloat(planData.priceAnnual) || 0,
+        currency: planData.currency || 'PKR',
+        max_branches: parseInt(planData.maxBranches, 10) || 1,
+        max_users: parseInt(planData.maxUsers, 10) || 3,
+        features: Array.isArray(planData.features) ? planData.features : (planData.features || '').split('\n').filter(Boolean),
+        badge: planData.badge?.trim() || null,
+        is_public: planData.isPublic !== false,
+        is_active: planData.isActive !== false,
+        sort_order: parseInt(planData.sortOrder, 10) || 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      const { data, error } = await supabase.from('subscription_plans').insert([newPlan]).select().single();
+      if (error) return { success: false, error: error.message };
+      return { success: true, plan: toCamelCase(data), data: toCamelCase(data) };
+    } catch (err) {
+      console.error('[SaaS API] Error creating plan:', err);
+      return { success: false, error: err.message || 'Failed to create plan.' };
+    }
   });
 
   // Update existing subscription plan
   ipcMain.handle('saas:update-plan', async (_event, { id, updates }) => {
-    requireSuperAdmin();
-    const localList = getLocalPlans();
-    let plan = localList.find(p => p.id === id || p.slug === id);
-    if (!plan) {
-      plan = DEFAULT_PLANS.find(p => p.id === id || p.slug === id) || { id, slug: id };
-    }
-
-    const updatedPlan = {
-      ...plan,
-      ...updates,
-      priceMonthly: updates.priceMonthly !== undefined ? parseFloat(updates.priceMonthly) : plan.priceMonthly,
-      priceAnnual: updates.priceAnnual !== undefined ? parseFloat(updates.priceAnnual) : plan.priceAnnual,
-      maxBranches: updates.maxBranches !== undefined ? parseInt(updates.maxBranches, 10) : plan.maxBranches,
-      maxUsers: updates.maxUsers !== undefined ? parseInt(updates.maxUsers, 10) : plan.maxUsers,
-      sortOrder: updates.sortOrder !== undefined ? parseInt(updates.sortOrder, 10) : plan.sortOrder,
-      features: updates.features !== undefined ? (Array.isArray(updates.features) ? updates.features : updates.features.split('\n').filter(Boolean)) : plan.features,
-      updatedAt: new Date().toISOString()
-    };
-
-    saveLocalPlan(updatedPlan);
-
     try {
-      const adminClient = getAdminClient();
-      if (adminClient) {
-        const payload = {};
-        if (updates.name !== undefined) payload.name = updates.name.trim();
-        if (updates.slug !== undefined) payload.slug = updates.slug.trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
-        if (updates.description !== undefined) payload.description = updates.description.trim();
-        if (updates.priceMonthly !== undefined) payload.price_monthly = parseFloat(updates.priceMonthly);
-        if (updates.priceAnnual !== undefined) payload.price_annual = parseFloat(updates.priceAnnual);
-        if (updates.currency !== undefined) payload.currency = updates.currency;
-        if (updates.maxBranches !== undefined) payload.max_branches = parseInt(updates.maxBranches, 10);
-        if (updates.maxUsers !== undefined) payload.max_users = parseInt(updates.maxUsers, 10);
-        if (updates.features !== undefined) payload.features = updatedPlan.features;
-        if (updates.badge !== undefined) payload.badge = updates.badge.trim();
-        if (updates.isPublic !== undefined) payload.is_public = updates.isPublic;
-        if (updates.isActive !== undefined) payload.is_active = updates.isActive;
-        if (updates.sortOrder !== undefined) payload.sort_order = parseInt(updates.sortOrder, 10);
-        payload.updated_at = new Date().toISOString();
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-        await adminClient
-          .from('subscription_plans')
-          .update(payload)
-          .eq('id', id);
+      const payload = {};
+      if (updates.name !== undefined) payload.name = updates.name.trim();
+      if (updates.slug !== undefined) payload.slug = updates.slug.trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
+      if (updates.description !== undefined) payload.description = updates.description.trim();
+      if (updates.priceMonthly !== undefined) payload.price_monthly = parseFloat(updates.priceMonthly);
+      if (updates.priceAnnual !== undefined) payload.price_annual = parseFloat(updates.priceAnnual);
+      if (updates.currency !== undefined) payload.currency = updates.currency;
+      if (updates.maxBranches !== undefined) payload.max_branches = parseInt(updates.maxBranches, 10);
+      if (updates.maxUsers !== undefined) payload.max_users = parseInt(updates.maxUsers, 10);
+      if (updates.features !== undefined) {
+        payload.features = Array.isArray(updates.features) ? updates.features : updates.features.split('\n').filter(Boolean);
       }
-    } catch (err) {
-      console.warn('[SaaS API] Plan updated in local store:', err.message);
-    }
+      if (updates.badge !== undefined) payload.badge = updates.badge.trim();
+      if (updates.isPublic !== undefined) payload.is_public = updates.isPublic;
+      if (updates.isActive !== undefined) payload.is_active = updates.isActive;
+      if (updates.sortOrder !== undefined) payload.sort_order = parseInt(updates.sortOrder, 10);
+      payload.updated_at = new Date().toISOString();
 
-    return { success: true, plan: updatedPlan };
+      const { data, error } = await supabase
+        .from('subscription_plans')
+        .update(payload)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) return { success: false, error: error.message };
+      return { success: true, plan: toCamelCase(data), data: toCamelCase(data) };
+    } catch (err) {
+      console.error('[SaaS API] Error updating plan:', err);
+      return { success: false, error: err.message || 'Failed to update plan.' };
+    }
   });
 
   // Delete subscription plan
   ipcMain.handle('saas:delete-plan', async (_event, id) => {
-    requireSuperAdmin();
-    deleteLocalPlan(id);
-
     try {
-      const adminClient = getAdminClient();
-      if (adminClient) {
-        await adminClient
-          .from('subscription_plans')
-          .delete()
-          .eq('id', id);
-      }
-    } catch (_) {}
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-    return { success: true };
+      const { error } = await supabase
+        .from('subscription_plans')
+        .delete()
+        .eq('id', id);
+
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } catch (err) {
+      console.error('[SaaS API] Error deleting plan:', err);
+      return { success: false, error: err.message || 'Failed to delete plan.' };
+    }
   });
 
   // ============================================================================
@@ -883,67 +837,80 @@ export function registerAppIpcHandlers(ipcMain) {
 
   // SuperAdmin: Get all platform settings
   ipcMain.handle('saas:get-platform-settings', async () => {
-    requireSuperAdmin();
-    let remoteSettings = {};
     try {
-      const adminClient = getAdminClient();
-      if (adminClient) {
-        const { data, error } = await adminClient
-          .from('platform_settings')
-          .select('*');
-        if (!error && data) {
-          data.forEach(row => {
-            remoteSettings[row.key] = row.value;
-          });
-        }
-      }
-    } catch (_) {}
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-    const localSettings = getLocalPlatformSettings();
-    return { ...localSettings, ...remoteSettings };
+      const { data, error } = await supabase
+        .from('platform_settings')
+        .select('*');
+
+      if (error) return { success: false, error: error.message };
+
+      const remoteSettings = {};
+      (data || []).forEach(row => {
+        let val = row.value;
+        if (typeof val === 'string') {
+          try { val = JSON.parse(val); } catch (_) {}
+        }
+        remoteSettings[row.key] = val;
+      });
+
+      return { success: true, data: remoteSettings };
+    } catch (err) {
+      console.error('[SaaS API] Error fetching platform settings:', err);
+      return { success: false, error: err.message || 'Failed to get platform settings.' };
+    }
   });
 
   // SuperAdmin: Update platform setting key
   ipcMain.handle('saas:update-platform-settings', async (_event, { key, value, category = 'general' }) => {
-    requireSuperAdmin();
-    const current = getLocalPlatformSettings();
-    current[key] = value;
-    setCacheData('platform_settings', current);
-
     try {
-      const adminClient = getAdminClient();
-      if (adminClient) {
-        await adminClient
-          .from('platform_settings')
-          .upsert({
-            key,
-            value,
-            category,
-            updated_at: new Date().toISOString()
-          });
-      }
-    } catch (err) {
-      console.warn('[SaaS API] Setting updated in local store:', err.message);
-    }
+      requireSuperAdmin();
+      const supabase = getSupabaseClient();
+      if (!supabase) return { success: false, error: 'Database client not initialized.' };
 
-    return { success: true, setting: { key, value } };
+      const { data, error } = await supabase
+        .from('platform_settings')
+        .upsert({
+          key,
+          value,
+          category,
+          updated_at: new Date().toISOString()
+        })
+        .select()
+        .single();
+
+      if (error) return { success: false, error: error.message };
+      return { success: true, setting: { key, value }, data: { key, value } };
+    } catch (err) {
+      console.error('[SaaS API] Error updating platform settings:', err);
+      return { success: false, error: err.message || 'Failed to update platform settings.' };
+    }
   });
 
   // Public: Get platform public config (Branding, Support, Active Announcement, etc.)
+  // Runs BEFORE login using anon Supabase client. RLS returns ONLY the platform_identity row.
   ipcMain.handle('platform:get-public-config', async () => {
     let remoteSettings = {};
     try {
-      const adminClient = getAdminClient();
-      const dbClient = adminClient || getSupabaseClient();
+      const dbClient = getSupabaseClient();
       if (dbClient) {
-        const { data, error } = await dbClient.from('platform_settings').select('*');
-        if (!error && data) {
+        const { data, error } = await dbClient.from('platform_settings').select('key, value');
+        if (!error && Array.isArray(data)) {
           data.forEach(row => {
-            remoteSettings[row.key] = row.value;
+            let val = row.value;
+            if (typeof val === 'string') {
+              try { val = JSON.parse(val); } catch (_) {}
+            }
+            remoteSettings[row.key] = val;
           });
         }
       }
-    } catch (_) {}
+    } catch (err) {
+      console.warn('[Platform API] Error fetching public config:', err.message);
+    }
 
     const localSettings = getLocalPlatformSettings();
     const merged = { ...localSettings, ...remoteSettings };
@@ -979,8 +946,7 @@ export function registerAppIpcHandlers(ipcMain) {
     });
 
     try {
-      const adminClient = getAdminClient();
-      const dbClient = adminClient || getSupabaseClient();
+      const dbClient = getSupabaseClient();
 
       if (dbClient) {
         const { data, error } = await dbClient
@@ -1114,19 +1080,7 @@ export function registerAppIpcHandlers(ipcMain) {
   // --- ONBOARDING & FIRST RUN ---
   // ============================================================================
   ipcMain.handle('api:get-is-first-run', async () => {
-    try {
-      const adminClient = getAdminClient();
-      if (!adminClient) return false;
-      const { count, error } = await adminClient.from('pharmacies').select('id', { count: 'exact', head: true });
-      if (error) {
-        console.error('[API] Error checking first run:', error.message);
-        return false;
-      }
-      return count === 0;
-    } catch (err) {
-      console.error('[API] getIsFirstRun error:', err.message);
-      return false;
-    }
+    return false;
   });
 
   // ============================================================================
@@ -1135,8 +1089,8 @@ export function registerAppIpcHandlers(ipcMain) {
   ipcMain.handle('api:get-branches', async () => {
     try {
       const user = getCurrentUser();
-      const adminClient = getAdminClient();
-      const dbClient = adminClient || getSupabaseClient();
+      const dbClient = getSupabaseClient();
+      if (!dbClient) return [];
       
       let query = dbClient.from('branches').select('*');
       if (user && user.role !== 'superadmin' && user.pharmacyId) {
@@ -1163,21 +1117,23 @@ export function registerAppIpcHandlers(ipcMain) {
 
     // Check branch quota against pharmacy plan
     if (user.role !== 'superadmin' && user.pharmacyId) {
-      const adminClient = getAdminClient();
-      const { data: pharm } = await adminClient
-        .from('pharmacies')
-        .select('max_branches')
-        .eq('id', user.pharmacyId)
-        .single();
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        const { data: pharm } = await supabase
+          .from('pharmacies')
+          .select('max_branches')
+          .eq('id', user.pharmacyId)
+          .maybeSingle();
 
-      const { count } = await adminClient
-        .from('branches')
-        .select('id', { count: 'exact', head: true })
-        .eq('pharmacy_id', user.pharmacyId);
+        const { count } = await supabase
+          .from('branches')
+          .select('id', { count: 'exact', head: true })
+          .eq('pharmacy_id', user.pharmacyId);
 
-      const maxAllowed = pharm?.max_branches || 1;
-      if (count >= maxAllowed) {
-        throw new Error(`Branch limit reached (${count}/${maxAllowed}). Please upgrade your SaaS plan to add more branch locations.`);
+        const maxAllowed = pharm?.max_branches || 1;
+        if (count >= maxAllowed) {
+          throw new Error(`Branch limit reached (${count}/${maxAllowed}). Please upgrade your SaaS plan to add more branch locations.`);
+        }
       }
     }
 

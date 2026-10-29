@@ -20,7 +20,6 @@
 import os from 'os';
 import {
   getSupabaseClient,
-  getAdminClient,
   setSession,
   clearSession as clearSupabaseSession,
 } from './supabaseClient.js';
@@ -50,61 +49,34 @@ export function updateCurrentUserPharmacyBranding({ name, logoUrl }) {
 
 /**
  * Logs in an existing user via Supabase Auth.
+ * Option A: Authenticates using the registered email address.
+ * Never reveals whether an email exists; all failures show "Invalid email or password."
  */
-export async function loginUser(username, password) {
+export async function loginUser(emailInput, password) {
   try {
-    if (!username || !password) {
-      return { success: false, error: 'Username and password are required.' };
+    if (!emailInput || !password) {
+      return { success: false, error: 'Invalid email or password.' };
     }
 
-    const trimmed = username.trim().toLowerCase();
+    const trimmed = emailInput.trim().toLowerCase();
+    if (!trimmed.includes('@')) {
+      return { success: false, error: 'Invalid email or password.' };
+    }
+
     const supabase = getSupabaseClient();
-    const adminClient = getAdminClient();
     if (!supabase) {
       return { success: false, error: 'Cloud service not initialised. Check your internet connection.' };
     }
 
-    // Determine candidate emails to try
-    let candidateEmails = [];
-    if (trimmed.includes('@')) {
-      candidateEmails.push(trimmed);
-    } else {
-      if (trimmed === 'superadmin') {
-        candidateEmails.push('superadmin@pharmacore.pk', 'superadmin@pharmacore.local');
-      } else if (trimmed === 'alshifa_admin' || trimmed === 'alshifa') {
-        candidateEmails.push('alshifa@pharmacore.pk', 'alshifa_admin@pharmacore.local');
-      } else if (trimmed === 'medix_admin' || trimmed === 'medix') {
-        candidateEmails.push('medix@pharmacore.pk', 'medix_admin@pharmacore.local');
-      } else if (trimmed === 'khyber_admin' || trimmed === 'khyber') {
-        candidateEmails.push('khyber@pharmacore.pk', 'khyber_admin@pharmacore.local');
-      } else if (trimmed === 'bolan_admin' || trimmed === 'bolan') {
-        candidateEmails.push('bolan@pharmacore.pk', 'bolan_admin@pharmacore.local');
-      } else {
-        candidateEmails.push(`${trimmed}@pharmacore.local`, `${trimmed}@pharmacore.pk`);
-      }
-    }
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      email: trimmed,
+      password,
+    });
 
-    let authData = null;
-    let authError = null;
-
-    for (const testEmail of candidateEmails) {
-      const res = await supabase.auth.signInWithPassword({
-        email: testEmail,
-        password,
-      });
-      if (!res.error && res.data?.user) {
-        authData = res.data;
-        authError = null;
-        break;
-      } else {
-        authError = res.error;
-      }
-    }
-
-    if (authError || !authData) {
-      console.log('[Auth] Login failed for', trimmed, ':', authError?.message);
-      await logActivity(null, trimmed, 'login_failed', null, null, { reason: authError?.message || 'Invalid credentials' });
-      return { success: false, error: 'Invalid username or password.' };
+    if (authError || !authData?.user) {
+      console.log('[Auth] Login failed for provided credentials');
+      await logActivity(null, trimmed, 'login_failed', null, null, { reason: 'Authentication failed' });
+      return { success: false, error: 'Invalid email or password.' };
     }
 
     // Set the session so all subsequent Supabase calls use this user's JWT
@@ -113,67 +85,26 @@ export async function loginUser(username, password) {
       await setSession(session.access_token, session.refresh_token);
     }
 
-    // Fetch or auto-heal the app_users row
-    const dbClient = adminClient || supabase;
-    let appUser = null;
-
-    // 1. Try by Auth User ID
-    const { data: userById } = await dbClient
+    // Fetch the app_users row using the authenticated client
+    const { data: appUser, error: appUserErr } = await supabase
       .from('app_users')
       .select('*')
       .eq('id', authData.user.id)
       .maybeSingle();
 
-    if (userById) {
-      appUser = userById;
-    } else {
-      // 2. Try by username
-      const { data: userByName } = await dbClient
-        .from('app_users')
-        .select('*')
-        .eq('username', trimmed)
-        .maybeSingle();
-
-      if (userByName) {
-        appUser = userByName;
-      } else {
-        // 3. Resilient fallback for superadmin / authenticated users
-        const isSuper = authData.user.email?.includes('superadmin') || trimmed.includes('superadmin');
-        const role = isSuper ? 'superadmin' : (authData.user.user_metadata?.role || 'pharmacist');
-        
-        const newAppUser = {
-          id: authData.user.id,
-          pharmacy_id: null,
-          username: trimmed,
-          display_name: authData.user.user_metadata?.display_name || (isSuper ? 'SaaS Super Administrator' : trimmed),
-          role: role,
-          branch_id: null,
-          can_view_all_branches: isSuper
-        };
-
-        if (adminClient) {
-          const { data: createdUser, error: insertErr } = await adminClient
-            .from('app_users')
-            .upsert(newAppUser)
-            .select()
-            .single();
-          if (!insertErr && createdUser) {
-            appUser = createdUser;
-          }
-        }
-        if (!appUser) {
-          appUser = newAppUser;
-        }
-      }
+    if (appUserErr || !appUser) {
+      console.log('[Auth] app_users profile not found for authenticated user');
+      await clearSupabaseSession();
+      return { success: false, error: 'Invalid email or password.' };
     }
 
     let pharmacyData = null;
     if (appUser.pharmacy_id) {
-      const { data: pharm } = await dbClient
+      const { data: pharm } = await supabase
         .from('pharmacies')
         .select('*')
         .eq('id', appUser.pharmacy_id)
-        .single();
+        .maybeSingle();
       pharmacyData = pharm || null;
     }
 
@@ -223,7 +154,7 @@ export async function loginUser(username, password) {
     };
   } catch (err) {
     console.error('[Auth] loginUser error:', err.message);
-    return { success: false, error: 'An unexpected error occurred during login.' };
+    return { success: false, error: 'Invalid email or password.' };
   }
 }
 
@@ -270,12 +201,10 @@ export async function createUserAccount(username, name, password, role, branchId
 
     const trimmed = username.trim().toLowerCase();
     const actualName = (name && name.trim()) ? name.trim() : trimmed;
-    const email = `${trimmed}@pharmacore.local`;
-
-    const adminClient = getAdminClient();
-    if (!adminClient) {
-      return { success: false, error: 'Admin service not available. Service role key not configured.' };
-    }
+    return {
+      success: false,
+      error: 'User creation requires a server-side function, not available yet.'
+    };
 
     // Check pharmacy user limits
     if (_currentUser.role !== 'superadmin' && _currentUser.pharmacyId) {
@@ -387,10 +316,10 @@ export async function registerPharmacy({
       return { success: false, error: 'Password must be at least 8 characters.' };
     }
 
-    const adminClient = getAdminClient();
-    if (!adminClient) {
-      return { success: false, error: 'Admin service unavailable. Check database configuration.' };
-    }
+    return {
+      success: false,
+      error: 'Pharmacy onboarding registration requires a server-side function, not available yet.'
+    };
 
     const cleanUsername = username.trim().toLowerCase();
     const authEmail = `${cleanUsername}@pharmacore.local`;
@@ -573,32 +502,34 @@ export async function updateUsername(userId, newUsername, newName) {
     }
 
     const actualName = (newName && newName.trim()) ? newName.trim() : trimmed;
-    const adminClient = getAdminClient();
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return { success: false, error: 'Database service unavailable.' };
+    }
 
     // Duplicate check
-    const { data: existing } = await adminClient
+    const { data: existing, error: checkErr } = await supabase
       .from('app_users')
       .select('id')
       .ilike('username', trimmed)
       .neq('id', userId)
       .limit(1);
 
+    if (checkErr) {
+      return { success: false, error: checkErr.message };
+    }
+
     if (existing && existing.length > 0) {
       return { success: false, error: 'Username already exists.' };
     }
 
-    const { error: updateError } = await adminClient
+    const { error: updateError } = await supabase
       .from('app_users')
       .update({ username: trimmed, display_name: actualName })
       .eq('id', userId);
 
     if (updateError) {
       return { success: false, error: `Failed to update: ${updateError.message}` };
-    }
-
-    if (adminClient) {
-      const newEmail = `${trimmed}@pharmacore.local`;
-      await adminClient.auth.admin.updateUserById(userId, { email: newEmail });
     }
 
     if (userId === _currentUser.id) {
@@ -631,12 +562,12 @@ export async function updateUserBranch(userId, newBranchId) {
       return { success: false, error: 'Branch ID is required.' };
     }
 
-    const adminClient = getAdminClient();
-    if (!adminClient) {
-      return { success: false, error: 'Admin service not available.' };
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return { success: false, error: 'Database service unavailable.' };
     }
 
-    const { error: updateError } = await adminClient
+    const { error: updateError } = await supabase
       .from('app_users')
       .update({ branch_id: newBranchId })
       .eq('id', userId);
@@ -658,35 +589,13 @@ export async function updateUserBranch(userId, newBranchId) {
 
 /**
  * Admin-only: Resets a user's password.
+ * Modifying another user's credentials in auth.users requires admin API / server-side function.
  */
 export async function resetUserPassword(userId, newPassword) {
-  try {
-    if (!_currentUser || !['admin', 'superadmin'].includes(_currentUser.role)) {
-      return { success: false, error: 'Unauthorised. Only administrators can reset passwords.' };
-    }
-    if (!newPassword || newPassword.length < 8) {
-      return { success: false, error: 'Password must be at least 8 characters.' };
-    }
-
-    const adminClient = getAdminClient();
-    if (!adminClient) {
-      return { success: false, error: 'Admin service not available.' };
-    }
-
-    const { error } = await adminClient.auth.admin.updateUserById(userId, {
-      password: newPassword,
-    });
-
-    if (error) {
-      return { success: false, error: `Failed to reset password: ${error.message}` };
-    }
-
-    await logActivity(_currentUser.id, _currentUser.username, 'password_reset', 'app_users', userId, {});
-    return { success: true };
-  } catch (err) {
-    console.error('[Auth] resetUserPassword error:', err.message);
-    return { success: false, error: 'Failed to reset password. Please try again.' };
-  }
+  return {
+    success: false,
+    error: 'Administrative password reset requires a server-side function, not available yet.'
+  };
 }
 
 /**
@@ -740,6 +649,14 @@ async function logActivity(userId, username, action, targetTable, targetRecordId
   } catch (err) {
     console.error('[Auth] Failed to log activity:', err.message);
   }
+}
+
+/**
+ * Test helper to set the current user without network calls.
+ * Used exclusively for testing role validation functions like requireSuperAdmin.
+ */
+export function _setCurrentUserForTesting(user) {
+  _currentUser = user;
 }
 
 /**
