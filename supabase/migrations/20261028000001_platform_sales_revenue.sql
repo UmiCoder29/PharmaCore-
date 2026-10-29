@@ -8,7 +8,7 @@
 -- 2. Fixed search_path = public to protect against search path injection attacks.
 -- 3. Execution revoked from PUBLIC and anon roles.
 -- 4. Granted exclusively to authenticated role.
--- Note: Do NOT apply this migration to any database until explicitly requested.
+-- Status: applied to the live project. Returns GROSS revenue (sum of sales.total_amount); there is no void or return flag on sales.
 
 CREATE OR REPLACE FUNCTION public.get_platform_sales_revenue()
 RETURNS NUMERIC

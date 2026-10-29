@@ -1,6 +1,6 @@
--- Prevent forged senders and tampering on subscription_inquiries.
--- Triggers run SECURITY INVOKER with a fixed search_path. Role truth comes from the caller's own app_users row
--- and the existing is_superadmin() helper.
+-- Migration: lock_subscription_inquiry_sender
+-- Description: Prevent forged senders and tampering on subscription_inquiries.
+-- Rollback: DROP TRIGGER IF EXISTS trg_guard_subscription_inquiry_insert ON public.subscription_inquiries; DROP TRIGGER IF EXISTS trg_guard_subscription_inquiry_update ON public.subscription_inquiries; DROP FUNCTION IF EXISTS public.guard_subscription_inquiry_insert(); DROP FUNCTION IF EXISTS public.guard_subscription_inquiry_update(); GRANT DELETE ON public.subscription_inquiries TO authenticated;
 
 create or replace function public.guard_subscription_inquiry_insert()
 returns trigger
