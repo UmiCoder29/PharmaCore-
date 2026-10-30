@@ -13,6 +13,11 @@
  * 7. Optional rate-limiting probe (--rate-limit)
  */
 
+if (process.env.NODE_TEST_CONTEXT) {
+  console.log('Skipping provision-pharmacy smoke test under automated test runner.');
+  process.exit(0);
+}
+
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -109,11 +114,6 @@ function logResult(name, passed, detail = '') {
 
 // ─── 4. Main Execution ────────────────────────────────────────────────────────
 async function runSmokeTests() {
-  if (process.env.NODE_TEST_CONTEXT) {
-    console.log('# PharmaCore provision-pharmacy Smoke Test: Skipped during automated node --test run (requires interactive credentials and deployed Edge Function).');
-    return;
-  }
-
   console.log('================================================================');
   console.log('PharmaCore provision-pharmacy Smoke Test (Live API)');
   console.log(`Target: ${functionUrl}`);
