@@ -1,0 +1,4 @@
+# Supabase Configuration
+
+[functions.provision-pharmacy]
+verify_jwt = true
