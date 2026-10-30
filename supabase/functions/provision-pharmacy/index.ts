@@ -382,6 +382,54 @@ Deno.serve(async (req: Request) => {
 
   const newAdminAuthId = authUserData.user.id;
 
+  // Helper to handle ambiguous RPC failures (network/timeout/exceptions) without premature deletion
+  async function handleAmbiguousFailure(authId: string, contextMessage: string): Promise<Response> {
+    console.warn(`[provision-pharmacy] ${contextMessage}. Inspecting app_users for auth_id: ${authId}`);
+
+    const { data: existingAppUser, error: lookupErr } = await supabaseAdmin
+      .from("app_users")
+      .select("id, pharmacy_id, username")
+      .eq("id", authId)
+      .maybeSingle();
+
+    if (lookupErr) {
+      console.error(JSON.stringify({
+        level: "ERROR",
+        event: "POSSIBLE_ORPHAN_AUTH_USER",
+        message: "Lookup failed after ambiguous RPC failure; auth user NOT deleted to prevent data desync",
+        auth_user_id: authId,
+        lookup_error: lookupErr.message,
+        timestamp: new Date().toISOString(),
+      }));
+      return jsonResponse(500, {
+        success: false,
+        error: "An ambiguous error occurred during provisioning. Please check admin accounts before retrying.",
+      });
+    }
+
+    if (existingAppUser) {
+      console.error(JSON.stringify({
+        level: "ERROR",
+        event: "PROVISIONING_UNCERTAIN_COMPLETED",
+        message: "app_users record exists after RPC error/timeout; auth user NOT deleted",
+        auth_user_id: authId,
+        pharmacy_id: existingAppUser.pharmacy_id,
+        timestamp: new Date().toISOString(),
+      }));
+      return jsonResponse(500, {
+        success: false,
+        error: "Provisioning may have completed despite network or timeout error. Please check tenant status before retrying.",
+      });
+    }
+
+    // Row does not exist in app_users; safe to delete auth user
+    await rollbackAuthUser(authId);
+    return jsonResponse(500, {
+      success: false,
+      error: "Failed to provision pharmacy database records.",
+    });
+  }
+
   try {
     // Phase 2: Call transactional RPC public.fn_provision_pharmacy
     const { data: rpcResult, error: rpcErr } = await supabaseAdmin.rpc("fn_provision_pharmacy", {
@@ -400,22 +448,29 @@ Deno.serve(async (req: Request) => {
 
     if (rpcErr) {
       await recordAttempt(callerProfile.id, "rpc_failed");
-      console.error("[provision-pharmacy] fn_provision_pharmacy RPC failed:", rpcErr.message);
+      console.error("[provision-pharmacy] fn_provision_pharmacy RPC failed:", rpcErr.message, "code:", rpcErr.code);
 
-      // Phase 3: Compensating delete with retry (up to 3 attempts with exponential delay)
-      await rollbackAuthUser(newAdminAuthId);
+      const hasDefinitePostgresCode = typeof rpcErr.code === "string" && rpcErr.code.trim().length > 0;
 
-      if (rpcErr.message && rpcErr.message.includes("Admin username is already taken")) {
-        return jsonResponse(400, {
+      if (hasDefinitePostgresCode) {
+        // Definite failure: Postgres error code guarantees transaction rolled back
+        await rollbackAuthUser(newAdminAuthId);
+
+        if (rpcErr.message && rpcErr.message.includes("Admin username is already taken")) {
+          return jsonResponse(400, {
+            success: false,
+            error: "Admin username is already taken. Please choose a different username.",
+          });
+        }
+
+        return jsonResponse(500, {
           success: false,
-          error: "Admin username is already taken. Please choose a different username.",
+          error: "Failed to provision pharmacy database records.",
         });
+      } else {
+        // Ambiguous failure: no Postgres code (network or timeout)
+        return await handleAmbiguousFailure(newAdminAuthId, `RPC error without error code: ${rpcErr.message}`);
       }
-
-      return jsonResponse(500, {
-        success: false,
-        error: "Failed to provision pharmacy database records.",
-      });
     }
 
     // Provisioning succeeded: record attempt outcome
@@ -438,10 +493,6 @@ Deno.serve(async (req: Request) => {
   } catch (unexpectedErr) {
     await recordAttempt(callerProfile.id, "rpc_failed");
     console.error("[provision-pharmacy] Unexpected exception during provisioning:", (unexpectedErr as Error).message);
-    await rollbackAuthUser(newAdminAuthId);
-    return jsonResponse(500, {
-      success: false,
-      error: "Unexpected error during pharmacy provisioning.",
-    });
+    return await handleAmbiguousFailure(newAdminAuthId, `Unexpected exception: ${(unexpectedErr as Error).message}`);
   }
 });

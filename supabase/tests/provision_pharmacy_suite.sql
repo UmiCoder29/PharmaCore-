@@ -201,8 +201,8 @@ BEGIN
     FROM public.pharmacies WHERE id = v_pharm_id;
 
     CALL pg_temp.assert_equal('2.1a trial status mapping', 'trial', v_status);
-    CALL pg_temp.assert_equal('2.1b trial_ends_at is set', 'TRUE', (v_trial_ends IS NOT NULL)::TEXT);
-    CALL pg_temp.assert_equal('2.1c subscription_ends_at is NULL for trial', 'TRUE', (v_sub_ends IS NULL)::TEXT);
+    CALL pg_temp.assert_equal('2.1b trial_ends_at is set', 'true', (v_trial_ends IS NOT NULL)::TEXT);
+    CALL pg_temp.assert_equal('2.1c subscription_ends_at is NULL for trial', 'true', (v_sub_ends IS NULL)::TEXT);
     CALL pg_temp.assert_equal('2.1d trial max_branches read from plans', '1', v_max_b::TEXT);
     CALL pg_temp.assert_equal('2.1e trial max_users read from plans', '3', v_max_u::TEXT);
 
@@ -218,8 +218,8 @@ BEGIN
     FROM public.pharmacies WHERE id = v_pharm_id;
 
     CALL pg_temp.assert_equal('2.2a paid status mapping', 'active', v_status);
-    CALL pg_temp.assert_equal('2.2b trial_ends_at is NULL for paid tier', 'TRUE', (v_trial_ends IS NULL)::TEXT);
-    CALL pg_temp.assert_equal('2.2c subscription_ends_at set for paid tier', 'TRUE', (v_sub_ends IS NOT NULL)::TEXT);
+    CALL pg_temp.assert_equal('2.2b trial_ends_at is NULL for paid tier', 'true', (v_trial_ends IS NULL)::TEXT);
+    CALL pg_temp.assert_equal('2.2c subscription_ends_at set for paid tier', 'true', (v_sub_ends IS NOT NULL)::TEXT);
     CALL pg_temp.assert_equal('2.2d professional max_branches read from plans', '5', v_max_b::TEXT);
     CALL pg_temp.assert_equal('2.2e professional max_users read from plans', '15', v_max_u::TEXT);
 
@@ -251,8 +251,8 @@ BEGIN
     );
     v_slug2 := v_res->>'slug';
 
-    CALL pg_temp.assert_equal('3.2a collision slug is distinct', 'TRUE', (v_slug2 <> v_slug1)::TEXT);
-    CALL pg_temp.assert_equal('3.2b collision slug starts with base slug', 'TRUE', (v_slug2 LIKE 'al-madina-pharmacy-%')::TEXT);
+    CALL pg_temp.assert_equal('3.2a collision slug is distinct', 'true', (v_slug2 <> v_slug1)::TEXT);
+    CALL pg_temp.assert_equal('3.2b collision slug starts with base slug', 'true', (v_slug2 LIKE 'al-madina-pharmacy-%')::TEXT);
 
     -- 3.3: Pure symbols / non-Latin name falls back to pharmacy-<random> (Provision 4)
     v_res := public.fn_provision_pharmacy(
@@ -261,7 +261,7 @@ BEGIN
     );
     v_slug3 := v_res->>'slug';
 
-    CALL pg_temp.assert_equal('3.3 empty slug fallback starts with pharmacy-', 'TRUE', (v_slug3 LIKE 'pharmacy-%')::TEXT);
+    CALL pg_temp.assert_equal('3.3 empty slug fallback starts with pharmacy-', 'true', (v_slug3 LIKE 'pharmacy-%')::TEXT);
 
     -- ==========================================================================
     -- TEST GROUP 4: USERNAME CASE-INSENSITIVITY & UNIQUENESS
@@ -306,7 +306,7 @@ BEGIN
     SELECT must_change_password INTO v_must_change
     FROM public.app_users WHERE id = v_admin1_id;
 
-    CALL pg_temp.assert_equal('5.1 must_change_password is true for new admin', 'TRUE', v_must_change::TEXT);
+    CALL pg_temp.assert_equal('5.1 must_change_password is true for new admin', 'true', v_must_change::TEXT);
 
     -- 5.2: Change test 5.2 to expect exactly 4 provision_pharmacy rows
     SELECT COUNT(*) INTO v_log_count
@@ -328,7 +328,7 @@ BEGIN
     CALL pg_temp.assert_equal('5.3a provisioned user role is admin', 'admin', v_admin_role);
     CALL pg_temp.assert_equal('5.3b provisioned user pharmacy_id matches', v_pharm_id::TEXT, v_admin_pharm_id::TEXT);
     CALL pg_temp.assert_equal('5.3c provisioned user branch_id matches', v_branch_id::TEXT, v_admin_branch_id::TEXT);
-    CALL pg_temp.assert_equal('5.3d provisioned branch is_main_branch is TRUE', 'TRUE', v_branch_is_main::TEXT);
+    CALL pg_temp.assert_equal('5.3d provisioned branch is_main_branch is TRUE', 'true', v_branch_is_main::TEXT);
     CALL pg_temp.assert_equal('5.3e provisioned branch pharmacy_id matches', v_pharm_id::TEXT, v_branch_pharm_id::TEXT);
 
     -- 5.4: Atomicity: call RPC so it fails AFTER pharmacy & branch inserts (reuse existing app_users id)
