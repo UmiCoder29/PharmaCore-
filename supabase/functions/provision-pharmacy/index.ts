@@ -1,14 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 // ─── HTTP Headers ────────────────────────────────────────────────────────────
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-
 const responseHeaders = {
-  ...corsHeaders,
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store, no-cache, must-revalidate",
   "Pragma": "no-cache",
@@ -25,7 +18,7 @@ function jsonResponse(status: number, data: Record<string, unknown>, extraHeader
 // Guarantees all four character classes, uses .length for all bounds, and
 // eliminates modulo bias via crypto rejection sampling.
 const UPPERCASE = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // 24 chars (I/O omitted)
-const LOWERCASE = "abcdefghjkmnpqrstuvwxyz"; // 24 chars (l omitted)
+const LOWERCASE = "abcdefghjkmnpqrstuvwxyz"; // 23 chars (i/l/o omitted)
 const DIGITS = "23456789";                   // 8 chars (0/1 omitted)
 const SYMBOLS = "!@#$%^&*()_+-=[]{}|";        // 19 chars
 
@@ -80,12 +73,7 @@ function generateTemporaryPassword(): string {
 
 // ─── Main Request Handler ────────────────────────────────────────────────────
 Deno.serve(async (req: Request) => {
-  // CORS Preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders });
-  }
-
-  // 1. Method check: POST only
+  // 1. Method check: POST only (caller is Electron main process)
   if (req.method !== "POST") {
     return jsonResponse(405, {
       success: false,
@@ -110,15 +98,39 @@ Deno.serve(async (req: Request) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  // Helper to record caller attempt in provision_attempts
+  // Helper to record caller attempt in provision_attempts (checks error return directly)
   async function recordAttempt(callerId: string, outcome: string) {
-    try {
-      await supabaseAdmin.from("provision_attempts").insert({
-        caller_id: callerId,
-        outcome,
-      });
-    } catch (err) {
-      console.error("[provision-pharmacy] Failed to record attempt:", (err as Error).message);
+    const { error: insertErr } = await supabaseAdmin.from("provision_attempts").insert({
+      caller_id: callerId,
+      outcome,
+    });
+    if (insertErr) {
+      console.error("[provision-pharmacy] Failed to record attempt:", insertErr.message);
+    }
+  }
+
+  // Helper to compensate and delete created GoTrue user on downstream failures
+  async function rollbackAuthUser(authId: string) {
+    let deleteSucceeded = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(authId);
+      if (!delErr) {
+        deleteSucceeded = true;
+        break;
+      }
+      if (attempt < 3) {
+        await new Promise((res) => setTimeout(res, attempt === 1 ? 500 : 1500));
+      }
+    }
+
+    if (!deleteSucceeded) {
+      console.error(JSON.stringify({
+        level: "ERROR",
+        event: "ORPHAN_AUTH_USER_CREATION_FAILURE",
+        message: "CRITICAL: Failed to delete orphaned auth user during provisioning rollback",
+        auth_user_id: authId,
+        timestamp: new Date().toISOString(),
+      }));
     }
   }
 
@@ -171,7 +183,7 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  // 4. Rate limit check: max 10 attempts per hour per superadmin (failed attempts count)
+  // 4. Rate limit check: max 10 attempts per hour per superadmin (fails closed on query error)
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const { count: attemptCount, error: countErr } = await supabaseAdmin
     .from("provision_attempts")
@@ -179,7 +191,16 @@ Deno.serve(async (req: Request) => {
     .eq("caller_id", callerProfile.id)
     .gte("created_at", oneHourAgo);
 
-  if (!countErr && (attemptCount ?? 0) >= 10) {
+  if (countErr) {
+    console.error("[provision-pharmacy] Rate limit check query failed:", countErr.message);
+    return jsonResponse(500, {
+      success: false,
+      error: "Rate limit check failed. Request aborted for safety.",
+    });
+  }
+
+  // Note: rate_limited attempts are recorded in provision_attempts and count toward the limit
+  if ((attemptCount ?? 0) >= 10) {
     await recordAttempt(callerProfile.id, "rate_limited");
     return jsonResponse(429, {
       success: false,
@@ -187,10 +208,10 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  // 5. Validation check: parse JSON body and check allowed keys & boundaries
-  let body: Record<string, unknown>;
+  // 5. Validation check: parse JSON body and require plain object (not null, array, or primitive)
+  let rawBody: unknown;
   try {
-    body = await req.json();
+    rawBody = await req.json();
   } catch {
     await recordAttempt(callerProfile.id, "validation_failed");
     return jsonResponse(400, {
@@ -198,6 +219,16 @@ Deno.serve(async (req: Request) => {
       error: "Invalid JSON request payload.",
     });
   }
+
+  if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+    await recordAttempt(callerProfile.id, "validation_failed");
+    return jsonResponse(400, {
+      success: false,
+      error: "Request body must be a plain JSON object.",
+    });
+  }
+
+  const body = rawBody as Record<string, unknown>;
 
   const allowedKeys = new Set([
     "pharmacyName",
@@ -351,76 +382,66 @@ Deno.serve(async (req: Request) => {
 
   const newAdminAuthId = authUserData.user.id;
 
-  // Phase 2: Call transactional RPC public.fn_provision_pharmacy
-  const { data: rpcResult, error: rpcErr } = await supabaseAdmin.rpc("fn_provision_pharmacy", {
-    p_admin_user_id: newAdminAuthId,
-    p_pharmacy_name: pharmacyName,
-    p_city: city,
-    p_contact_phone: phone,
-    p_contact_email: adminEmail,
-    p_admin_username: normalizedUsername,
-    p_admin_display_name: adminDisplayName || normalizedUsername,
-    p_branch_name: branchName,
-    p_plan_tier: planTier,
-    p_caller_user_id: callerProfile.id,
-    p_caller_username: callerProfile.username,
-  });
+  try {
+    // Phase 2: Call transactional RPC public.fn_provision_pharmacy
+    const { data: rpcResult, error: rpcErr } = await supabaseAdmin.rpc("fn_provision_pharmacy", {
+      p_admin_user_id: newAdminAuthId,
+      p_pharmacy_name: pharmacyName,
+      p_city: city,
+      p_contact_phone: phone,
+      p_contact_email: adminEmail,
+      p_admin_username: normalizedUsername,
+      p_admin_display_name: adminDisplayName || normalizedUsername,
+      p_branch_name: branchName,
+      p_plan_tier: planTier,
+      p_caller_user_id: callerProfile.id,
+      p_caller_username: callerProfile.username,
+    });
 
-  if (rpcErr) {
-    await recordAttempt(callerProfile.id, "rpc_failed");
-    console.error("[provision-pharmacy] fn_provision_pharmacy RPC failed:", rpcErr.message);
+    if (rpcErr) {
+      await recordAttempt(callerProfile.id, "rpc_failed");
+      console.error("[provision-pharmacy] fn_provision_pharmacy RPC failed:", rpcErr.message);
 
-    // Phase 3: Compensating delete with retry (up to 3 attempts with exponential delay)
-    let deleteSucceeded = false;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(newAdminAuthId);
-      if (!delErr) {
-        deleteSucceeded = true;
-        break;
+      // Phase 3: Compensating delete with retry (up to 3 attempts with exponential delay)
+      await rollbackAuthUser(newAdminAuthId);
+
+      if (rpcErr.message && rpcErr.message.includes("Admin username is already taken")) {
+        return jsonResponse(400, {
+          success: false,
+          error: "Admin username is already taken. Please choose a different username.",
+        });
       }
-      if (attempt < 3) {
-        await new Promise((res) => setTimeout(res, attempt === 1 ? 500 : 1500));
-      }
-    }
 
-    if (!deleteSucceeded) {
-      console.error(JSON.stringify({
-        level: "ERROR",
-        event: "ORPHAN_AUTH_USER_CREATION_FAILURE",
-        message: "CRITICAL: Failed to delete orphaned auth user during provisioning rollback",
-        auth_user_id: newAdminAuthId,
-        timestamp: new Date().toISOString(),
-      }));
-    }
-
-    if (rpcErr.message && rpcErr.message.includes("Admin username is already taken")) {
-      return jsonResponse(400, {
+      return jsonResponse(500, {
         success: false,
-        error: "Admin username is already taken. Please choose a different username.",
+        error: "Failed to provision pharmacy database records.",
       });
     }
 
+    // Provisioning succeeded: record attempt outcome
+    await recordAttempt(callerProfile.id, "success");
+
+    return jsonResponse(200, {
+      success: true,
+      pharmacy: {
+        id: rpcResult.pharmacy_id,
+        name: rpcResult.pharmacy_name,
+        slug: rpcResult.slug,
+      },
+      admin: {
+        id: rpcResult.app_user_id,
+        username: rpcResult.username,
+        email: adminEmail,
+      },
+      temporaryPassword,
+    });
+  } catch (unexpectedErr) {
+    await recordAttempt(callerProfile.id, "rpc_failed");
+    console.error("[provision-pharmacy] Unexpected exception during provisioning:", (unexpectedErr as Error).message);
+    await rollbackAuthUser(newAdminAuthId);
     return jsonResponse(500, {
       success: false,
-      error: "Failed to provision pharmacy database records.",
+      error: "Unexpected error during pharmacy provisioning.",
     });
   }
-
-  // Provisioning succeeded: record attempt outcome
-  await recordAttempt(callerProfile.id, "success");
-
-  return jsonResponse(200, {
-    success: true,
-    pharmacy: {
-      id: rpcResult.pharmacy_id,
-      name: rpcResult.pharmacy_name,
-      slug: rpcResult.slug,
-    },
-    admin: {
-      id: rpcResult.app_user_id,
-      username: rpcResult.username,
-      email: adminEmail,
-    },
-    temporaryPassword,
-  });
 });
