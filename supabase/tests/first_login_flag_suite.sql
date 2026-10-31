@@ -61,6 +61,7 @@ DECLARE
     -- Verification records
     v_rec RECORD;
     v_res BOOLEAN;
+    v_rows_updated INT;
 
     -- Report compilation
     v_total INT;
@@ -72,26 +73,61 @@ BEGIN
     -- --------------------------------------------------------------------------
     -- A. CREATE FIXTURES
     -- --------------------------------------------------------------------------
-    INSERT INTO public.pharmacies (id, name, slug, is_active, plan_tier, subscription_status)
-    VALUES (v_pharm_id, 'Flag Test Pharmacy', 'flag-test-' || substr(v_pharm_id::text, 1, 8), true, 'trial', 'trialing');
+    -- Insert auth.users rows first (required by foreign key app_users.id -> auth.users.id)
+    INSERT INTO auth.users (id, email, aud, role)
+    VALUES 
+        (v_admin_a_id, 'flag_admin_a@test.local', 'authenticated', 'authenticated'),
+        (v_pharm_b_id, 'flag_pharm_b@test.local', 'authenticated', 'authenticated'),
+        (v_victim_c_id, 'flag_victim_c@test.local', 'authenticated', 'authenticated'),
+        (v_unknown_user, 'flag_unknown_user@test.local', 'authenticated', 'authenticated');
 
-    INSERT INTO public.branches (id, pharmacy_id, name, is_active)
+    INSERT INTO public.pharmacies (id, name, slug, is_active, plan_tier, subscription_status)
+    VALUES (v_pharm_id, 'Flag Test Pharmacy', 'flag-test-' || substr(v_pharm_id::text, 1, 8), true, 'trial', 'trial');
+
+    INSERT INTO public.branches (id, pharmacy_id, name, is_main_branch)
     VALUES (v_branch_id, v_pharm_id, 'Flag Test Branch', true);
 
     -- Admin user A (must_change_password = true)
-    INSERT INTO public.app_users (id, pharmacy_id, branch_id, username, display_name, role, is_active, must_change_password)
+    INSERT INTO public.app_users (id, pharmacy_id, branch_id, username, display_name, role, can_view_all_branches, must_change_password)
     VALUES (v_admin_a_id, v_pharm_id, v_branch_id, 'admin_flag_test', 'Admin Flag Test', 'admin', true, true);
 
     -- Pharmacist user B (must_change_password = true)
-    INSERT INTO public.app_users (id, pharmacy_id, branch_id, username, display_name, role, is_active, must_change_password)
-    VALUES (v_pharm_b_id, v_pharm_id, v_branch_id, 'pharm_flag_test', 'Pharm Flag Test', 'pharmacist', true, true);
+    INSERT INTO public.app_users (id, pharmacy_id, branch_id, username, display_name, role, can_view_all_branches, must_change_password)
+    VALUES (v_pharm_b_id, v_pharm_id, v_branch_id, 'pharm_flag_test', 'Pharm Flag Test', 'pharmacist', false, true);
 
     -- Victim Pharmacist user C (must_change_password = true)
-    INSERT INTO public.app_users (id, pharmacy_id, branch_id, username, display_name, role, is_active, must_change_password)
-    VALUES (v_victim_c_id, v_pharm_id, v_branch_id, 'victim_flag_test', 'Victim Flag Test', 'pharmacist', true, true);
+    INSERT INTO public.app_users (id, pharmacy_id, branch_id, username, display_name, role, can_view_all_branches, must_change_password)
+    VALUES (v_victim_c_id, v_pharm_id, v_branch_id, 'victim_flag_test', 'Victim Flag Test', 'pharmacist', false, true);
 
     -- --------------------------------------------------------------------------
-    -- B. TEST 1: anon cannot execute fn_clear_own_must_change_password()
+    -- B. PREMISE TEST: Direct UPDATE by pharmacist changes 0 rows (no error, flag stays true)
+    -- This proves the problem that fn_clear_own_must_change_password() exists to solve:
+    -- Under RLS (policy admin_write_app_users), a pharmacist cannot UPDATE app_users.
+    -- --------------------------------------------------------------------------
+    v_rows_updated := -1;
+    BEGIN
+        PERFORM set_config('role', 'authenticated', true);
+        PERFORM set_config('request.jwt.claims', jsonb_build_object('sub', v_pharm_b_id::text, 'role', 'authenticated')::text, true);
+
+        UPDATE public.app_users
+        SET must_change_password = false
+        WHERE id = v_pharm_b_id;
+
+        GET DIAGNOSTICS v_rows_updated = ROW_COUNT;
+        CALL pg_temp.assert_equal('0. Premise: direct UPDATE by pharmacist changes 0 rows', '0', v_rows_updated::text);
+        CALL pg_temp.assert_equal('0. Premise: direct UPDATE raises no error', 'SUCCESS', 'SUCCESS');
+    EXCEPTION WHEN OTHERS THEN
+        CALL pg_temp.assert_equal('0. Premise: direct UPDATE raises no error', 'SUCCESS', SQLSTATE, 'Unexpected error: ' || SQLERRM);
+    END;
+
+    -- Reset role to postgres to verify the database row
+    PERFORM set_config('role', 'postgres', true);
+
+    SELECT * INTO v_rec FROM public.app_users WHERE id = v_pharm_b_id;
+    CALL pg_temp.assert_equal('0. Premise: pharmacist flag stays true after direct UPDATE', 'true', v_rec.must_change_password::text);
+
+    -- --------------------------------------------------------------------------
+    -- C. TEST 1: anon cannot execute fn_clear_own_must_change_password()
     -- --------------------------------------------------------------------------
     BEGIN
         PERFORM set_config('role', 'anon', true);
@@ -109,7 +145,7 @@ BEGIN
     PERFORM set_config('role', 'postgres', true);
 
     -- --------------------------------------------------------------------------
-    -- C. TEST 2 & 3: Admin A clears only their own flag
+    -- D. TEST 2 & 3: Admin A clears only their own flag
     -- --------------------------------------------------------------------------
     PERFORM set_config('role', 'authenticated', true);
     PERFORM set_config('request.jwt.claims', jsonb_build_object('sub', v_admin_a_id::text, 'role', 'authenticated')::text, true);
@@ -127,7 +163,7 @@ BEGIN
     CALL pg_temp.assert_equal('3.3 Admin A branch_id unchanged', v_branch_id::text, v_rec.branch_id::text);
 
     -- --------------------------------------------------------------------------
-    -- D. TEST 4 & 5: Pharmacist B clears only their own flag
+    -- E. TEST 4 & 5: Pharmacist B clears only their own flag
     -- --------------------------------------------------------------------------
     PERFORM set_config('role', 'authenticated', true);
     PERFORM set_config('request.jwt.claims', jsonb_build_object('sub', v_pharm_b_id::text, 'role', 'authenticated')::text, true);
@@ -145,7 +181,7 @@ BEGIN
     CALL pg_temp.assert_equal('5.3 Pharmacist B branch_id unchanged', v_branch_id::text, v_rec.branch_id::text);
 
     -- --------------------------------------------------------------------------
-    -- E. TEST 6: Neither can clear anyone else's flag (Victim Pharmacist C remains unchanged)
+    -- F. TEST 6: Neither can clear anyone else's flag (Victim Pharmacist C remains unchanged)
     -- --------------------------------------------------------------------------
     SELECT * INTO v_rec FROM public.app_users WHERE id = v_victim_c_id;
     CALL pg_temp.assert_equal('6.1 Victim Pharmacist C flag remains true', 'true', v_rec.must_change_password::text);
@@ -154,8 +190,9 @@ BEGIN
     CALL pg_temp.assert_equal('6.4 Victim Pharmacist C branch_id unchanged', v_branch_id::text, v_rec.branch_id::text);
 
     -- --------------------------------------------------------------------------
-    -- F. TEST 7: Unknown user id returns false
+    -- G. TEST 7: Unknown user id returns false
     -- --------------------------------------------------------------------------
+    -- v_unknown_user has an auth.users row but no app_users row
     PERFORM set_config('role', 'authenticated', true);
     PERFORM set_config('request.jwt.claims', jsonb_build_object('sub', v_unknown_user::text, 'role', 'authenticated')::text, true);
 

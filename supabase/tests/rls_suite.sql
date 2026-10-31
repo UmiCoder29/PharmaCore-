@@ -1027,7 +1027,7 @@ BEGIN
     -- ==========================================================================
     -- 7. CATALOG AUDIT (FUNCTION & TABLE GRANTS)
     -- ==========================================================================
-    -- Catalog audit for functions: authenticated must have EXECUTE on exactly 10 functions.
+    -- Catalog audit for functions: authenticated must have EXECUTE on exactly 11 functions.
     -- anon must have EXECUTE on 0 functions.
     FOR v_rec IN
         SELECT p.proname,
@@ -1050,7 +1050,8 @@ BEGIN
         IF v_rec.proname IN (
             'is_superadmin', 'is_admin', 'get_user_pharmacy_id', 'get_user_branch_id',
             'can_view_all_branches', 'process_sale', 'process_return', 'approve_return',
-            'get_supplier_dashboard_stats', 'fn_clear_own_must_change_password'
+            'get_supplier_dashboard_stats', 'fn_clear_own_must_change_password',
+            'get_platform_sales_revenue'
         ) THEN
             IF v_rec.auth_exec THEN
                 CALL pg_temp.log_result('7. Catalog Audit', 'authenticated can EXECUTE ' || v_rec.proname, 'catalog', 'pg_proc', 'EXECUTE', 'ALLOWED', 'ALLOWED', '00000', '');
