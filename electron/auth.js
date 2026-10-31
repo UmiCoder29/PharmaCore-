@@ -27,6 +27,21 @@ import {
 // ─── Session state ────────────────────────────────────────────────────────────
 
 let _currentUser = null; // { id, username, name, role, pharmacyId, pharmacyName, branchId, subscription, ... }
+let _passwordAlreadyChangedInSession = false;
+
+const COMMON_WEAK_PASSWORDS = new Set([
+  'password123',
+  'password1234',
+  '1234567890',
+  'admin12345',
+  'adminpassword',
+  'pharmacore1',
+  'pharmacore123',
+  'welcome1234',
+  'letmein1234',
+  'changeme123',
+  'iloveyou123'
+]);
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -53,6 +68,7 @@ export function updateCurrentUserPharmacyBranding({ name, logoUrl }) {
  * Never reveals whether an email exists; all failures show "Invalid email or password."
  */
 export async function loginUser(emailInput, password) {
+  _passwordAlreadyChangedInSession = false;
   try {
     if (!emailInput || !password) {
       return { success: false, error: 'Invalid email or password.' };
@@ -118,7 +134,7 @@ export async function loginUser(emailInput, password) {
       pharmacyLogo: pharmacyData?.logo_url || null,
       branchId: appUser.branch_id,
       canViewAllBranches: appUser.can_view_all_branches || appUser.role === 'superadmin',
-      mustChangePassword: !!(appUser.must_change_password || authData.user.user_metadata?.must_change_password),
+      mustChangePassword: !!appUser.must_change_password,
       subscription: pharmacyData ? {
         planTier: pharmacyData.plan_tier,
         status: pharmacyData.subscription_status,
@@ -178,6 +194,7 @@ export async function logoutUser() {
   } finally {
     clearSupabaseSession();
     _currentUser = null;
+    _passwordAlreadyChangedInSession = false;
   }
 }
 
@@ -186,7 +203,13 @@ export async function logoutUser() {
  */
 export async function createUserAccount(username, name, password, role, branchId) {
   try {
-    if (!_currentUser || !['admin', 'superadmin'].includes(_currentUser.role)) {
+    if (!_currentUser) {
+      return { success: false, error: 'Unauthorised. Only administrators can create accounts.' };
+    }
+    if (_currentUser.mustChangePassword) {
+      return { success: false, error: 'Unauthorized: Password change required.' };
+    }
+    if (!['admin', 'superadmin'].includes(_currentUser.role)) {
       return { success: false, error: 'Unauthorised. Only administrators can create accounts.' };
     }
     if (!username || username.trim().length < 3) {
@@ -243,7 +266,13 @@ export async function registerPharmacy({
  */
 export async function updateUsername(userId, newUsername, newName) {
   try {
-    if (!_currentUser || !['admin', 'superadmin'].includes(_currentUser.role)) {
+    if (!_currentUser) {
+      return { success: false, error: 'Unauthorised. Only administrators can edit usernames.' };
+    }
+    if (_currentUser.mustChangePassword) {
+      return { success: false, error: 'Unauthorized: Password change required.' };
+    }
+    if (!['admin', 'superadmin'].includes(_currentUser.role)) {
       return { success: false, error: 'Unauthorised. Only administrators can edit usernames.' };
     }
 
@@ -305,7 +334,13 @@ export async function updateUsername(userId, newUsername, newName) {
  */
 export async function updateUserBranch(userId, newBranchId) {
   try {
-    if (!_currentUser || !_currentUser.canViewAllBranches) {
+    if (!_currentUser) {
+      return { success: false, error: 'Unauthorised. Only owners can reassign branches.' };
+    }
+    if (_currentUser.mustChangePassword) {
+      return { success: false, error: 'Unauthorized: Password change required.' };
+    }
+    if (!_currentUser.canViewAllBranches) {
       return { success: false, error: 'Unauthorised. Only owners can reassign branches.' };
     }
 
@@ -357,19 +392,44 @@ export async function changeOwnPassword(newPassword) {
     if (!_currentUser) {
       return { success: false, error: 'Not authenticated.' };
     }
-    if (!newPassword || newPassword.length < 8) {
-      return { success: false, error: 'Password must be at least 8 characters.' };
-    }
+
     const supabase = getSupabaseClient();
     if (!supabase) {
       return { success: false, error: 'Database service unavailable.' };
     }
-    const { error } = await supabase.auth.updateUser({ password: newPassword });
-    if (error) {
-      return { success: false, error: error.message };
+
+    if (!_passwordAlreadyChangedInSession) {
+      if (typeof newPassword !== 'string') {
+        return { success: false, error: 'Password must be a valid string.' };
+      }
+      if (newPassword.length < 10) {
+        return { success: false, error: 'Password must be at least 10 characters long.' };
+      }
+      if (Buffer.byteLength(newPassword, 'utf8') > 72) {
+        return { success: false, error: 'Password cannot exceed 72 bytes in length.' };
+      }
+      if (COMMON_WEAK_PASSWORDS.has(newPassword.toLowerCase())) {
+        return { success: false, error: 'Password is too common or weak. Please choose a more secure password.' };
+      }
+
+      const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+      if (updateError) {
+        return { success: false, error: updateError.message };
+      }
+      _passwordAlreadyChangedInSession = true;
     }
-    await supabase.from('app_users').update({ must_change_password: false }).eq('id', _currentUser.id);
+
+    const { data: flagCleared, error: rpcError } = await supabase.rpc('fn_clear_own_must_change_password');
+    if (rpcError || flagCleared !== true) {
+      return {
+        success: false,
+        passwordAlreadyChanged: true,
+        error: rpcError?.message || 'Password was updated, but failed to complete setup. Please click Finish Setup to retry.'
+      };
+    }
+
     _currentUser.mustChangePassword = false;
+    _passwordAlreadyChangedInSession = false;
     await logActivity(_currentUser.id, _currentUser.username, 'password_change', 'app_users', _currentUser.id, {});
     return { success: true };
   } catch (err) {
@@ -408,6 +468,15 @@ async function logActivity(userId, username, action, targetTable, targetRecordId
  */
 export function _setCurrentUserForTesting(user) {
   _currentUser = user;
+  _passwordAlreadyChangedInSession = false;
+}
+
+export function _getPasswordAlreadyChangedForTesting() {
+  return _passwordAlreadyChangedInSession;
+}
+
+export function _setPasswordAlreadyChangedForTesting(val) {
+  _passwordAlreadyChangedInSession = val;
 }
 
 /**

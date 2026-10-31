@@ -2,6 +2,20 @@ import React, { useLayoutEffect, useRef, useState } from 'react';
 import gsap from 'gsap';
 import { Store, Lock, User, Sparkles, ArrowRight, KeyRound, ShieldAlert } from 'lucide-react';
 
+const COMMON_WEAK_PASSWORDS = new Set([
+  'password123',
+  'password1234',
+  '1234567890',
+  'admin12345',
+  'adminpassword',
+  'pharmacore1',
+  'pharmacore123',
+  'welcome1234',
+  'letmein1234',
+  'changeme123',
+  'iloveyou123'
+]);
+
 export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -13,6 +27,7 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
   const [pendingUser, setPendingUser] = useState(null);
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordAlreadyChanged, setPasswordAlreadyChanged] = useState(false);
   const [changePasswordError, setChangePasswordError] = useState('');
   const [changePasswordLoading, setChangePasswordLoading] = useState(false);
 
@@ -76,14 +91,30 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
   const handleChangePasswordSubmit = async event => {
     event.preventDefault();
     setChangePasswordError('');
-    if (!newPassword || newPassword.length < 8) {
-      setChangePasswordError('Password must be at least 8 characters.');
-      return;
+
+    if (!passwordAlreadyChanged) {
+      if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 10) {
+        setChangePasswordError('Password must be at least 10 characters.');
+        return;
+      }
+      if (new Blob([newPassword]).size > 72) {
+        setChangePasswordError('Password cannot exceed 72 bytes in length.');
+        return;
+      }
+      if (COMMON_WEAK_PASSWORDS.has(newPassword.toLowerCase())) {
+        setChangePasswordError('Password is too common or weak. Please choose a more secure password.');
+        return;
+      }
+      if (password && newPassword === password) {
+        setChangePasswordError('New password cannot be the same as your temporary password.');
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        setChangePasswordError('Passwords do not match.');
+        return;
+      }
     }
-    if (newPassword !== confirmPassword) {
-      setChangePasswordError('Passwords do not match.');
-      return;
-    }
+
     setChangePasswordLoading(true);
 
     try {
@@ -100,6 +131,9 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
           subscription: pendingUser.subscription
         });
       } else {
+        if (res.passwordAlreadyChanged) {
+          setPasswordAlreadyChanged(true);
+        }
         setChangePasswordError(res.error || 'Failed to update password.');
         setChangePasswordLoading(false);
       }
@@ -228,43 +262,53 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                   <ShieldAlert className="w-4 h-4 text-amber-600" />
                   <span>First Login Security Requirement</span>
                 </div>
-                <h2 className="font-title text-3xl tracking-[-.04em] text-ink">Set New Password</h2>
+                <h2 className="font-title text-3xl tracking-[-.04em] text-ink">
+                  {passwordAlreadyChanged ? 'Finish Account Setup' : 'Set New Password'}
+                </h2>
                 <p className="mt-2 text-sm leading-6 text-ink/60">
-                  Welcome, <strong>{pendingUser?.name || pendingUser?.username}</strong>. You must create your personal password before accessing the system.
+                  {passwordAlreadyChanged ? (
+                    <>Your password has already been changed to the one you entered. Please complete the setup step to access your workstation.</>
+                  ) : (
+                    <>Welcome, <strong>{pendingUser?.name || pendingUser?.username}</strong>. You must create your personal password before accessing the system.</>
+                  )}
                 </p>
               </div>
 
               <form onSubmit={handleChangePasswordSubmit} className="space-y-4">
-                <label className="block">
-                  <span className="mb-2 block text-xs font-bold text-ink/75">New Password (min 8 characters)</span>
-                  <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
-                    <KeyRound className="mr-3 h-4 w-4 text-emerald" />
-                    <input
-                      autoFocus
-                      type="password"
-                      value={newPassword}
-                      onChange={e => setNewPassword(e.target.value)}
-                      disabled={changePasswordLoading}
-                      placeholder="Enter new strong password"
-                      className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
-                    />
-                  </div>
-                </label>
+                {!passwordAlreadyChanged && (
+                  <>
+                    <label className="block">
+                      <span className="mb-2 block text-xs font-bold text-ink/75">New Password (min 10 characters, max 72 bytes)</span>
+                      <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
+                        <KeyRound className="mr-3 h-4 w-4 text-emerald" />
+                        <input
+                          autoFocus
+                          type="password"
+                          value={newPassword}
+                          onChange={e => setNewPassword(e.target.value)}
+                          disabled={changePasswordLoading}
+                          placeholder="Enter new strong password"
+                          className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                        />
+                      </div>
+                    </label>
 
-                <label className="block">
-                  <span className="mb-2 block text-xs font-bold text-ink/75">Confirm New Password</span>
-                  <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
-                    <Lock className="mr-3 h-4 w-4 text-emerald" />
-                    <input
-                      type="password"
-                      value={confirmPassword}
-                      onChange={e => setConfirmPassword(e.target.value)}
-                      disabled={changePasswordLoading}
-                      placeholder="Repeat new password"
-                      className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
-                    />
-                  </div>
-                </label>
+                    <label className="block">
+                      <span className="mb-2 block text-xs font-bold text-ink/75">Confirm New Password</span>
+                      <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
+                        <Lock className="mr-3 h-4 w-4 text-emerald" />
+                        <input
+                          type="password"
+                          value={confirmPassword}
+                          onChange={e => setConfirmPassword(e.target.value)}
+                          disabled={changePasswordLoading}
+                          placeholder="Repeat new password"
+                          className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                        />
+                      </div>
+                    </label>
+                  </>
+                )}
 
                 {changePasswordError && (
                   <div className="rounded-xl border border-terracotta/20 bg-terracotta/5 px-4 py-3 text-xs font-medium text-terracotta">
@@ -277,7 +321,13 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                   disabled={changePasswordLoading}
                   className="group relative mt-2 flex w-full items-center justify-center gap-3 overflow-hidden rounded-2xl bg-emerald py-4 text-sm font-bold text-white shadow-[0_16px_28px_rgba(41,196,135,.2)] transition-all hover:-translate-y-0.5 hover:bg-emerald/90 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {changePasswordLoading ? 'Updating credentials…' : 'Save Password & Continue'}
+                  {changePasswordLoading ? (
+                    'Completing setup…'
+                  ) : passwordAlreadyChanged ? (
+                    'Finish Setup & Continue'
+                  ) : (
+                    'Save Password & Continue'
+                  )}
                   <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
                 </button>
               </form>
