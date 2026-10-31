@@ -93,7 +93,11 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
     setChangePasswordError('');
 
     if (!passwordAlreadyChanged) {
-      if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 10) {
+      if (!newPassword || typeof newPassword !== 'string' || !newPassword.trim()) {
+        setChangePasswordError('Password cannot be blank or made only of spaces.');
+        return;
+      }
+      if (newPassword.length < 10) {
         setChangePasswordError('Password must be at least 10 characters.');
         return;
       }

@@ -239,6 +239,27 @@ describe('First-Login Password Flow & Security Verification', () => {
       assert.equal(mock.getUpdateUserCalls(), 0);
     });
 
+    it('rejects a password of ten spaces', async () => {
+      const mock = createMockClient();
+      _setSupabaseClientForTesting(mock);
+
+      const res = await changeOwnPassword('          ');
+      assert.equal(res.success, false);
+      assert.equal(res.error, 'Password cannot be blank or made only of spaces.');
+      assert.equal(mock.getUpdateUserCalls(), 0);
+    });
+
+    it('accepts password with real characters and leading or trailing spaces and sends it unchanged', async () => {
+      const mock = createMockClient();
+      _setSupabaseClientForTesting(mock);
+
+      const untrimmed = '  ValidPassword2026!  ';
+      const res = await changeOwnPassword(untrimmed);
+      assert.equal(res.success, true);
+      assert.equal(mock.getUpdateUserCalls(), 1);
+      assert.equal(mock.getLastUpdateUserArg().password, untrimmed);
+    });
+
     it('rejects common weak passwords from blocklist', async () => {
       const mock = createMockClient();
       _setSupabaseClientForTesting(mock);
@@ -381,6 +402,97 @@ describe('First-Login Password Flow & Security Verification', () => {
       assert.equal(getCurrentUser().mustChangePassword, true);
       assert.equal(_getPasswordAlreadyChangedForTesting(), false);
     });
+
+    it('thrown error after marker is set returns passwordAlreadyChanged: true and does not leak err.message', async () => {
+      _setCurrentUserForTesting({
+        id: 'usr-throw-after',
+        username: 'throw_after_user',
+        role: 'admin',
+        pharmacyId: 'ph-1',
+        branchId: 'br-1',
+        mustChangePassword: true
+      });
+
+      const mock = createMockClient({
+        rpcResult: () => {
+          throw new Error('Supabase RPC connection reset violently');
+        }
+      });
+      _setSupabaseClientForTesting(mock);
+
+      const res = await changeOwnPassword('StrongPassword2026!');
+      assert.equal(res.success, false);
+      assert.equal(res.passwordAlreadyChanged, true);
+      assert.equal(res.error, 'Password was updated, but setup did not finish. Please click Finish Setup to retry.');
+      assert.equal(res.error.includes('violently'), false);
+      assert.equal(mock.getUpdateUserCalls(), 1);
+      assert.equal(mock.getRpcCalls(), 1);
+      assert.equal(_getPasswordAlreadyChangedForTesting(), true);
+    });
+
+    it('thrown error before marker is set does not return passwordAlreadyChanged and does not leak err.message', async () => {
+      _setCurrentUserForTesting({
+        id: 'usr-throw-before',
+        username: 'throw_before_user',
+        role: 'admin',
+        pharmacyId: 'ph-1',
+        branchId: 'br-1',
+        mustChangePassword: true
+      });
+
+      const mock = createMockClient();
+      mock.auth.updateUser = async () => {
+        throw new Error('Supabase Auth network socket exploded');
+      };
+      _setSupabaseClientForTesting(mock);
+
+      const res = await changeOwnPassword('StrongPassword2026!');
+      assert.equal(res.success, false);
+      assert.equal(res.passwordAlreadyChanged, undefined);
+      assert.equal(res.error, 'Failed to update password.');
+      assert.equal(res.error.includes('exploded'), false);
+      assert.equal(getCurrentUser().mustChangePassword, true);
+      assert.equal(_getPasswordAlreadyChangedForTesting(), false);
+    });
+
+    it('retry with an empty password still reaches the flag step', async () => {
+      _setCurrentUserForTesting({
+        id: 'usr-retry-empty',
+        username: 'retry_empty_user',
+        role: 'pharmacist',
+        pharmacyId: 'ph-1',
+        branchId: 'br-1',
+        mustChangePassword: true
+      });
+
+      let rpcCallCount = 0;
+      const mock = createMockClient({
+        rpcResult: () => {
+          rpcCallCount++;
+          if (rpcCallCount === 1) {
+            return { data: false, error: null }; // First call fails
+          }
+          return { data: true, error: null };  // Retry succeeds
+        }
+      });
+      _setSupabaseClientForTesting(mock);
+
+      // Attempt 1: Password set, flag RPC returns false
+      const res1 = await changeOwnPassword('InitialStrongPassword123');
+      assert.equal(res1.success, false);
+      assert.equal(res1.passwordAlreadyChanged, true);
+      assert.equal(mock.getUpdateUserCalls(), 1);
+      assert.equal(mock.getRpcCalls(), 1);
+      assert.equal(_getPasswordAlreadyChangedForTesting(), true);
+
+      // Attempt 2: Retry with empty string '' as password (from hidden field)
+      const res2 = await changeOwnPassword('');
+      assert.equal(res2.success, true);
+      assert.equal(mock.getUpdateUserCalls(), 1); // Not called again
+      assert.equal(mock.getRpcCalls(), 2);         // RPC was called
+      assert.equal(getCurrentUser().mustChangePassword, false);
+      assert.equal(_getPasswordAlreadyChangedForTesting(), false);
+    });
   });
 
   // ─── 4. Guarded Administrative Handlers ────────────────────────────────────
@@ -448,17 +560,27 @@ describe('First-Login Password Flow & Security Verification', () => {
       });
 
       let hasState = false;
+      let hasSetStateCall = false;
       let hasConditionalInputs = false;
       let hasFinishSetupText = false;
       let hasWeakPasswordList = false;
+      let hasTrimValidation = false;
 
       traverse(ast, {
         Identifier(path) {
           if (path.node.name === 'passwordAlreadyChanged') {
             hasState = true;
           }
+          if (path.node.name === 'setPasswordAlreadyChanged') {
+            hasSetStateCall = true;
+          }
           if (path.node.name === 'COMMON_WEAK_PASSWORDS') {
             hasWeakPasswordList = true;
+          }
+        },
+        MemberExpression(path) {
+          if (path.node.property?.name === 'trim') {
+            hasTrimValidation = true;
           }
         },
         StringLiteral(path) {
@@ -474,6 +596,8 @@ describe('First-Login Password Flow & Security Verification', () => {
       });
 
       assert.equal(hasState, true, 'LoginScreen must declare passwordAlreadyChanged state');
+      assert.equal(hasSetStateCall, true, 'LoginScreen must update passwordAlreadyChanged state when response carries passwordAlreadyChanged');
+      assert.equal(hasTrimValidation, true, 'LoginScreen must check trim() on new password to reject whitespace-only passwords');
       assert.equal(hasWeakPasswordList, true, 'LoginScreen must declare COMMON_WEAK_PASSWORDS');
       assert.equal(hasFinishSetupText, true, 'LoginScreen must render Finish Setup on retry');
       assert.equal(hasConditionalInputs, true, 'LoginScreen must conditionally render input fields using !passwordAlreadyChanged');

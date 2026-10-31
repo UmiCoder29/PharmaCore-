@@ -402,6 +402,9 @@ export async function changeOwnPassword(newPassword) {
       if (typeof newPassword !== 'string') {
         return { success: false, error: 'Password must be a valid string.' };
       }
+      if (!newPassword.trim()) {
+        return { success: false, error: 'Password cannot be blank or made only of spaces.' };
+      }
       if (newPassword.length < 10) {
         return { success: false, error: 'Password must be at least 10 characters long.' };
       }
@@ -434,6 +437,13 @@ export async function changeOwnPassword(newPassword) {
     return { success: true };
   } catch (err) {
     console.error('[Auth] changeOwnPassword error:', err.message);
+    if (_passwordAlreadyChangedInSession) {
+      return {
+        success: false,
+        passwordAlreadyChanged: true,
+        error: 'Password was updated, but setup did not finish. Please click Finish Setup to retry.'
+      };
+    }
     return { success: false, error: 'Failed to update password.' };
   }
 }
