@@ -26,12 +26,16 @@ CREATE TEMP TABLE IF NOT EXISTS pg_temp.flag_test_results (
 
 TRUNCATE TABLE pg_temp.flag_test_results;
 
+-- SECURITY DEFINER so assertions can be recorded while the session role is authenticated or anon.
 CREATE OR REPLACE PROCEDURE pg_temp.assert_equal(
     p_name TEXT,
     p_expected TEXT,
     p_actual TEXT,
     p_details TEXT DEFAULT ''
-) AS $$
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
 BEGIN
     INSERT INTO pg_temp.flag_test_results (test_name, expected, actual, status, details)
     VALUES (
@@ -42,7 +46,7 @@ BEGIN
         p_details
     );
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 -- ------------------------------------------------------------------------------
 -- 2. MAIN TEST SUITE (DO BLOCK)
