@@ -306,8 +306,8 @@ BEGIN
             -- activity_logs is INSERT-only (UPDATE and DELETE blocked)
             IF p_op IN ('SELECT', 'INSERT') THEN RETURN 'ALLOWED'; ELSE RETURN 'BLOCKED'; END IF;
         ELSIF p_tbl = 'subscription_inquiries' THEN
-            -- subscription_inquiries allows SELECT, INSERT, UPDATE; no DELETE
-            IF p_op = 'DELETE' THEN RETURN 'BLOCKED'; ELSE RETURN 'ALLOWED'; END IF;
+            -- subscription_inquiries allows SELECT, INSERT; UPDATE blocked by immutability trigger; no DELETE
+            IF p_op IN ('SELECT', 'INSERT') THEN RETURN 'ALLOWED'; ELSE RETURN 'BLOCKED'; END IF;
         ELSIF p_tbl IN ('subscription_plans', 'platform_settings') THEN
             -- Platform tables: SELECT active/all allowed; writes superadmin only
             IF p_op = 'SELECT' THEN RETURN 'ALLOWED'; ELSE RETURN 'BLOCKED'; END IF;
@@ -335,8 +335,8 @@ BEGIN
             -- activity_logs is INSERT-only; admin-only read
             IF p_op = 'INSERT' THEN RETURN 'ALLOWED'; ELSE RETURN 'BLOCKED'; END IF;
         ELSIF p_tbl = 'subscription_inquiries' THEN
-            -- subscription_inquiries allows SELECT, INSERT, UPDATE for any member; no DELETE
-            IF p_op = 'DELETE' THEN RETURN 'BLOCKED'; ELSE RETURN 'ALLOWED'; END IF;
+            -- subscription_inquiries allows SELECT, INSERT; UPDATE blocked by immutability trigger; no DELETE
+            IF p_op IN ('SELECT', 'INSERT') THEN RETURN 'ALLOWED'; ELSE RETURN 'BLOCKED'; END IF;
         ELSIF p_tbl IN ('subscription_plans', 'platform_settings') THEN
             -- Platform tables: SELECT active/all allowed; writes superadmin only
             IF p_op = 'SELECT' THEN RETURN 'ALLOWED'; ELSE RETURN 'BLOCKED'; END IF;
@@ -595,10 +595,15 @@ BEGIN
         (v_setting_b, v_pharm_b, v_branch_b1, 'receipt_header', '{"text": "Pharmacy B"}'),
         (v_setting_a_del, v_pharm_a, v_branch_a1, 'del_setting', '{"text": "Del"}');
 
+    PERFORM set_config('request.jwt.claims', jsonb_build_object('sub', v_admin_a::TEXT, 'role', 'authenticated')::TEXT, true);
     INSERT INTO public.subscription_inquiries (id, pharmacy_id, sender_id, sender_name, sender_role, message)
-    VALUES 
-        (v_inq_a, v_pharm_a, v_admin_a, 'Admin A', 'admin', 'Inquiry A'),
-        (v_inq_b, v_pharm_b, v_admin_b, 'Admin B', 'admin', 'Inquiry B');
+    VALUES (v_inq_a, v_pharm_a, v_admin_a, 'Admin A', 'admin', 'Inquiry A');
+
+    PERFORM set_config('request.jwt.claims', jsonb_build_object('sub', v_admin_b::TEXT, 'role', 'authenticated')::TEXT, true);
+    INSERT INTO public.subscription_inquiries (id, pharmacy_id, sender_id, sender_name, sender_role, message)
+    VALUES (v_inq_b, v_pharm_b, v_admin_b, 'Admin B', 'admin', 'Inquiry B');
+
+    PERFORM set_config('request.jwt.claims', '', true);
 
     -- 0.10 Platform Tables
     INSERT INTO public.subscription_plans (id, name, slug, price_monthly, is_active)
@@ -787,7 +792,8 @@ BEGIN
     -- return_items           | ALLOWED, BLOCKED, BLOCKED, BLOCKED | ALLOWED, BLOCKED, BLOCKED, BLOCKED
     -- activity_logs          | ALLOWED, ALLOWED, BLOCKED, BLOCKED | BLOCKED, ALLOWED, BLOCKED, BLOCKED
     -- settings               | ALLOWED, ALLOWED, ALLOWED, ALLOWED | ALLOWED, BLOCKED, BLOCKED, BLOCKED
-    -- subscription_inquiries | ALLOWED, ALLOWED, ALLOWED, BLOCKED | ALLOWED, ALLOWED, ALLOWED, BLOCKED
+    -- subscription_inquiries | ALLOWED, ALLOWED, BLOCKED, BLOCKED | ALLOWED, ALLOWED, BLOCKED, BLOCKED
+    -- (UPDATE blocked by immutability trigger guard_subscription_inquiry_update from 20261029000001_lock_subscription_inquiry_sender.sql)
     -- subscription_plans     | ALLOWED, BLOCKED, BLOCKED, BLOCKED | ALLOWED, BLOCKED, BLOCKED, BLOCKED
     -- platform_settings      | ALLOWED, BLOCKED, BLOCKED, BLOCKED | ALLOWED, BLOCKED, BLOCKED, BLOCKED
     -- --------------------------------------------------------------------------
