@@ -124,6 +124,25 @@ export function registerAppIpcHandlers(ipcMain) {
   ipcMain.handle('saas:create-pharmacy', async (_event, pharmacyData) => {
     try {
       requireSuperAdmin();
+      if (!pharmacyData || typeof pharmacyData !== 'object' || Array.isArray(pharmacyData)) {
+        return { success: false, error: 'Pharmacy data must be an object.' };
+      }
+      const pharmacyName = (pharmacyData.pharmacyName || pharmacyData.name || '').trim();
+      if (pharmacyName.length < 2 || pharmacyName.length > 100) {
+        return { success: false, error: 'Pharmacy name must be between 2 and 100 characters.' };
+      }
+      const email = (pharmacyData.adminEmail || pharmacyData.email || '').trim();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!email || email.length > 255 || !emailRegex.test(email)) {
+        return { success: false, error: 'A valid owner login email is required.' };
+      }
+      const username = (pharmacyData.adminUsername || pharmacyData.username || '').trim();
+      if (username) {
+        const usernameRegex = /^[a-zA-Z0-9_]{3,50}$/;
+        if (!usernameRegex.test(username)) {
+          return { success: false, error: 'Admin username must be 3-50 characters using only letters, numbers, and underscores.' };
+        }
+      }
       return await registerPharmacy(pharmacyData);
     } catch (error) {
       console.error('[SaaS API] Error creating pharmacy:', error);

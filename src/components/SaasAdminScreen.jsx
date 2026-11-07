@@ -27,9 +27,19 @@ import {
   Mail,
   Phone,
   MapPin,
-  UserPlus
+  UserPlus,
+  Copy
 } from 'lucide-react';
 import DataTable from './DataTable.jsx';
+
+function generateUsername(fullName) {
+  if (!fullName || typeof fullName !== 'string') return '';
+  let clean = fullName.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  if (!clean) return '';
+  if (clean.length < 3) clean = clean.padEnd(3, '_');
+  if (clean.length > 50) clean = clean.slice(0, 50).replace(/_+$/, '');
+  return clean;
+}
 
 export default function SaasAdminScreen({ user }) {
   const [pharmacies, setPharmacies] = useState([]);
@@ -42,6 +52,8 @@ export default function SaasAdminScreen({ user }) {
   const [selectedPharmacy, setSelectedPharmacy] = useState(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [notification, setNotification] = useState({ message: '', type: '' });
+  const [provisionedCredentials, setProvisionedCredentials] = useState(null);
+  const [copied, setCopied] = useState(false);
 
   // Create Pharmacy Form
   const [formData, setFormData] = useState({
@@ -49,12 +61,10 @@ export default function SaasAdminScreen({ user }) {
     city: 'Karachi',
     phone: '',
     email: '',
-    address: '',
     username: '',
     name: '',
-    password: '',
     branchName: 'Main Branch',
-    planTier: 'professional'
+    planTier: 'trial'
   });
 
   // Edit Subscription Form
@@ -108,25 +118,40 @@ export default function SaasAdminScreen({ user }) {
     e.preventDefault();
     setActionLoading(true);
     try {
-      const res = await window.pharmacoreAPI.createPharmacy(formData);
+      const res = await window.pharmacoreAPI.createPharmacy({
+        pharmacyName: formData.pharmacyName,
+        city: formData.city,
+        phone: formData.phone || null,
+        adminEmail: formData.email,
+        adminDisplayName: formData.name || null,
+        adminUsername: formData.username,
+        branchName: formData.branchName,
+        planTier: formData.planTier
+      });
       if (res.success) {
         showNotice(`Pharmacy "${formData.pharmacyName}" provisioned successfully!`);
         setShowCreateModal(false);
+        setProvisionedCredentials({
+          pharmacyName: res.pharmacy?.name || formData.pharmacyName,
+          pharmacySlug: res.pharmacy?.slug || '',
+          email: res.admin?.email || formData.email,
+          username: res.finalUsername || res.admin?.username || formData.username,
+          temporaryPassword: res.temporaryPassword,
+          note: res.note || null
+        });
         setFormData({
           pharmacyName: '',
           city: 'Karachi',
           phone: '',
           email: '',
-          address: '',
           username: '',
           name: '',
-          password: '',
           branchName: 'Main Branch',
-          planTier: 'professional'
+          planTier: 'trial'
         });
         fetchData();
       } else {
-        showNotice(res.error || 'Failed to create pharmacy tenant.', 'error');
+        showNotice(res.error || 'Failed to create pharmacy tenant. The owner login email may already be registered.', 'error');
       }
     } catch (err) {
       showNotice(err.message || 'Error provisioning pharmacy.', 'error');
@@ -616,19 +641,20 @@ export default function SaasAdminScreen({ user }) {
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">Contact Email</label>
+                    <label className="block font-bold text-slate-700 mb-1">Owner login email *</label>
                     <input
                       type="email"
-                      placeholder="info@pharmacy.com"
+                      required
+                      placeholder="owner@pharmacy.com"
                       value={formData.email}
                       onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                      className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-900 outline-none focus:border-emerald-600 shadow-sm"
+                      className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-bold text-slate-900 outline-none focus:border-emerald-600 shadow-sm"
                     />
                   </div>
                 </div>
               </div>
 
-              {/* Section 2: Owner Login Credentials */}
+              {/* Section 2: Owner Login Account */}
               <div className="bg-slate-50/80 border border-slate-200/90 rounded-2xl p-4 space-y-3">
                 <div className="flex items-center gap-2 text-slate-800 font-extrabold text-[11px] uppercase tracking-wider">
                   <Lock className="w-3.5 h-3.5 text-emerald-600" />
@@ -642,7 +668,14 @@ export default function SaasAdminScreen({ user }) {
                       type="text"
                       placeholder="Dr. Tariq Khan"
                       value={formData.name}
-                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      onChange={(e) => {
+                        const newName = e.target.value;
+                        setFormData(prev => ({
+                          ...prev,
+                          name: newName,
+                          username: generateUsername(newName)
+                        }));
+                      }}
                       className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-900 outline-none focus:border-emerald-600 shadow-sm"
                     />
                   </div>
@@ -652,24 +685,15 @@ export default function SaasAdminScreen({ user }) {
                     <input
                       type="text"
                       required
-                      placeholder="tariqadmin"
+                      placeholder="e.g. dr_tariq_khan"
                       value={formData.username}
                       onChange={(e) => setFormData({ ...formData, username: e.target.value })}
                       className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-bold text-slate-900 outline-none focus:border-emerald-600 shadow-sm font-mono"
                     />
+                    <p className="text-[10px] text-slate-500 font-medium mt-1">
+                      Auto-generated (3-50 chars, lowercase letters, numbers, underscores). You can edit it.
+                    </p>
                   </div>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Password (min 8 chars) *</label>
-                  <input
-                    type="password"
-                    required
-                    placeholder="••••••••"
-                    value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-bold text-slate-900 outline-none focus:border-emerald-600 shadow-sm font-mono"
-                  />
                 </div>
               </div>
 
@@ -726,6 +750,105 @@ export default function SaasAdminScreen({ user }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* One-Time Credential Card Modal */}
+      {provisionedCredentials && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[110] flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
+          <div className="relative z-[111] bg-white text-slate-900 rounded-[28px] max-w-lg w-full shadow-2xl border border-slate-200/80 overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-slate-900 px-6 py-5 sm:px-8 text-white flex items-center justify-between border-b border-emerald-800/40">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shadow-inner shrink-0">
+                  <CheckCircle2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="text-lg sm:text-xl font-black tracking-tight text-white">
+                    Pharmacy Provisioned
+                  </h2>
+                  <p className="text-xs text-emerald-200 font-medium">
+                    One-time initial owner login credentials
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 sm:p-8 space-y-5 text-xs">
+              {/* Warning Banner */}
+              <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-start gap-3 text-amber-900">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-extrabold text-[11px] uppercase tracking-wider text-amber-800">
+                    One-Time Credential Notice
+                  </p>
+                  <p className="text-xs leading-relaxed font-medium text-amber-900">
+                    Copy this password now. It will not be shown again. The owner will be required to set a new password on their first login.
+                  </p>
+                </div>
+              </div>
+
+              {/* Username adjustment notice if collision occurred */}
+              {provisionedCredentials.note && (
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-blue-800 font-medium flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
+                  <span>{provisionedCredentials.note}</span>
+                </div>
+              )}
+
+              {/* Credentials Details Card */}
+              <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3">
+                <div className="flex justify-between items-center py-1.5 border-b border-slate-200/60">
+                  <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px]">Pharmacy Business</span>
+                  <span className="font-extrabold text-slate-900 text-sm">{provisionedCredentials.pharmacyName}</span>
+                </div>
+                <div className="flex justify-between items-center py-1.5 border-b border-slate-200/60">
+                  <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px]">Owner Login Email</span>
+                  <span className="font-mono font-bold text-slate-900">{provisionedCredentials.email}</span>
+                </div>
+                <div className="flex justify-between items-center py-1.5 border-b border-slate-200/60">
+                  <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px]">Admin Username</span>
+                  <span className="font-mono font-bold text-slate-900">{provisionedCredentials.username}</span>
+                </div>
+                <div className="pt-2">
+                  <div className="flex justify-between items-center mb-1.5">
+                    <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px]">Temporary Password</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const text = `PharmaCore Credentials\nPharmacy: ${provisionedCredentials.pharmacyName}\nEmail: ${provisionedCredentials.email}\nUsername: ${provisionedCredentials.username}\nTemporary Password: ${provisionedCredentials.temporaryPassword}`;
+                        navigator.clipboard.writeText(text);
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 3000);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-[11px] shadow-sm transition-all"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5 stroke-[2.5]" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copied ? 'Copied!' : 'Copy Credentials'}</span>
+                    </button>
+                  </div>
+                  <div className="p-3 bg-slate-900 text-emerald-400 font-mono text-sm font-black rounded-xl tracking-wider select-all border border-slate-800 text-center">
+                    {provisionedCredentials.temporaryPassword}
+                  </div>
+                </div>
+              </div>
+
+              {/* Done button */}
+              <div className="pt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProvisionedCredentials(null);
+                    setCopied(false);
+                  }}
+                  className="w-full sm:w-auto px-6 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center justify-center gap-2"
+                >
+                  <Check className="w-4 h-4 stroke-[2.5]" />
+                  <span>Done & Close</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

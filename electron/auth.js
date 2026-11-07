@@ -233,31 +233,196 @@ export async function createUserAccount(username, name, password, role, branchId
 }
 
 /**
- * Registers a new pharmacy tenant (SaaS Onboarding / Self-Registration).
+ * Generates a clean lowercase username from an owner's full name:
+ * Lowercase, spaces and non-alphanumeric characters become underscores,
+ * collapse repeated underscores, trim leading/trailing underscores, pad to at least 3 chars.
+ * E.g., "Dr Tariq Khan" -> "dr_tariq_khan".
  */
-export async function registerPharmacy({
-  pharmacyName,
-  username,
-  password,
-}) {
-  try {
-    if (!pharmacyName || pharmacyName.trim().length < 2) {
-      return { success: false, error: 'Pharmacy business name is required.' };
+export function generateUsername(fullName) {
+  if (!fullName || typeof fullName !== 'string') return 'admin';
+  let clean = fullName.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  if (!clean) return 'admin';
+  if (clean.length < 3) clean = clean.padEnd(3, '_');
+  if (clean.length > 50) clean = clean.slice(0, 50).replace(/_+$/, '');
+  return clean;
+}
+
+/**
+ * Appends a short numeric suffix for username collision retry.
+ */
+export function appendNumericSuffix(username) {
+  const clean = (username || 'admin').trim();
+  const match = clean.match(/^(.*?)_?(\d+)$/);
+  if (match) {
+    const base = match[1];
+    const nextNum = parseInt(match[2], 10) + 1;
+    return `${base}_${nextNum}`.slice(0, 50);
+  }
+  return `${clean}_1`.slice(0, 50);
+}
+
+/**
+ * Maps status code and server error message to a concise, user-friendly message.
+ */
+export function mapProvisioningError(statusCode, serverMessage) {
+  const lower = (serverMessage || '').toLowerCase();
+  if (statusCode === 429 || lower.includes('rate limit')) {
+    return 'Provisioning rate limit reached (maximum 10 per hour). Please wait before trying again.';
+  }
+  if (statusCode === 403 || lower.includes('forbidden') || lower.includes('superadmin access required')) {
+    return 'Access denied: SuperAdmin permission required.';
+  }
+  if (lower.includes('already taken') || lower.includes('username is already taken')) {
+    return 'Admin username is already taken. Please choose a different username.';
+  }
+  if (lower.includes('invalid email') || lower.includes('email address format')) {
+    return 'Invalid owner login email address format.';
+  }
+  if (lower.includes('plan') || lower.includes('subscription plan')) {
+    return 'Invalid or inactive subscription plan selected.';
+  }
+  if (lower.includes('pharmacy name')) {
+    return 'Pharmacy name must be between 2 and 100 characters.';
+  }
+  return 'Failed to provision pharmacy. The owner login email may already be registered, or input details are invalid.';
+}
+
+/**
+ * Helper to invoke the provision-pharmacy Edge Function with exact allowed keys.
+ */
+async function callProvisionEdgeFunction(supabase, sessionToken, payload) {
+  const { data, error } = await supabase.functions.invoke('provision-pharmacy', {
+    body: payload,
+    headers: {
+      Authorization: `Bearer ${sessionToken}`
     }
-    if (!username || username.trim().length < 3) {
-      return { success: false, error: 'Admin username must be at least 3 characters.' };
+  });
+
+  if (error) {
+    let statusCode = 500;
+    let serverMessage = '';
+
+    if (error.context) {
+      if (typeof error.context.status === 'number') {
+        statusCode = error.context.status;
+      }
+      if (typeof error.context.json === 'function') {
+        try {
+          const body = await error.context.json();
+          serverMessage = body?.error || body?.message || '';
+        } catch (_) {
+          try {
+            if (typeof error.context.text === 'function') {
+              serverMessage = await error.context.text();
+            }
+          } catch (_) { }
+        }
+      }
     }
-    if (!password || password.length < 8) {
-      return { success: false, error: 'Password must be at least 8 characters.' };
+    if (!serverMessage) {
+      serverMessage = error.message || '';
     }
 
+    return { success: false, statusCode, serverMessage };
+  }
+
+  return { success: true, data };
+}
+
+/**
+ * Registers a new pharmacy tenant via the provision-pharmacy Edge Function.
+ * Strictly uses the superadmin session token; never uses service role keys.
+ */
+export async function registerPharmacy(pharmacyData) {
+  try {
+    if (!pharmacyData || typeof pharmacyData !== 'object' || Array.isArray(pharmacyData)) {
+      return { success: false, error: 'Invalid pharmacy data payload.' };
+    }
+
+    const pharmacyName = (pharmacyData.pharmacyName || '').trim();
+    const adminEmail = (pharmacyData.adminEmail || pharmacyData.email || '').trim().toLowerCase();
+    const adminUsername = (pharmacyData.adminUsername || pharmacyData.username || '').trim();
+    const planTier = (pharmacyData.planTier || 'trial').trim();
+    const branchName = (pharmacyData.branchName || 'Main Branch').trim();
+    const city = (pharmacyData.city || 'Karachi').trim();
+    const phone = pharmacyData.phone ? String(pharmacyData.phone).trim() : null;
+    const adminDisplayName = (pharmacyData.adminDisplayName || pharmacyData.name || '').trim() || null;
+
+    if (pharmacyName.length < 2 || pharmacyName.length > 100) {
+      return { success: false, error: 'Pharmacy business name must be between 2 and 100 characters.' };
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (adminEmail.length < 5 || adminEmail.length > 255 || !emailRegex.test(adminEmail)) {
+      return { success: false, error: 'Invalid owner login email address format.' };
+    }
+    const usernameRegex = /^[a-zA-Z0-9_]+$/;
+    if (adminUsername.length < 3 || adminUsername.length > 50 || !usernameRegex.test(adminUsername)) {
+      return { success: false, error: 'Admin username must be between 3 and 50 characters (letters, numbers, underscores only).' };
+    }
+    if (planTier.length < 2 || planTier.length > 50) {
+      return { success: false, error: 'Subscription plan tier must be between 2 and 50 characters.' };
+    }
+
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return { success: false, error: 'Cloud service not initialized. Check your internet connection.' };
+    }
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const sessionToken = sessionData?.session?.access_token;
+    if (!sessionToken) {
+      return { success: false, error: 'Access denied: SuperAdmin permission required.' };
+    }
+
+    // Build payload with ONLY the accepted keys expected by provision-pharmacy Edge Function
+    // Do NOT send password or address (address cannot be stored by the Edge Function).
+    const payload = {
+      pharmacyName,
+      adminEmail,
+      adminUsername,
+      planTier,
+      branchName,
+      city
+    };
+    if (phone) payload.phone = phone;
+    if (adminDisplayName) payload.adminDisplayName = adminDisplayName;
+
+    let res = await callProvisionEdgeFunction(supabase, sessionToken, payload);
+
+    // If username is taken, retry ONCE with a short numeric suffix
+    let usernameAdjusted = false;
+    let finalUsername = adminUsername;
+    if (!res.success && (res.serverMessage.toLowerCase().includes('already taken') || res.serverMessage.toLowerCase().includes('username'))) {
+      finalUsername = appendNumericSuffix(adminUsername);
+      const retryPayload = { ...payload, adminUsername: finalUsername };
+      const retryRes = await callProvisionEdgeFunction(supabase, sessionToken, retryPayload);
+      if (retryRes.success) {
+        res = retryRes;
+        usernameAdjusted = true;
+      }
+    }
+
+    if (!res.success) {
+      return {
+        success: false,
+        error: mapProvisioningError(res.statusCode, res.serverMessage)
+      };
+    }
+
+    // Success response: returns pharmacy, admin, and one-time temporaryPassword
     return {
-      success: false,
-      error: 'Pharmacy onboarding registration requires a server-side function, not available yet.'
+      success: true,
+      pharmacy: res.data.pharmacy,
+      admin: res.data.admin,
+      temporaryPassword: res.data.temporaryPassword,
+      usernameAdjusted,
+      originalUsername: adminUsername,
+      finalUsername,
+      note: usernameAdjusted ? `Username was already taken; provisioned as "${finalUsername}" instead.` : null
     };
   } catch (err) {
-    console.error('[Auth] registerPharmacy error:', err);
-    return { success: false, error: err.message || 'Registration encountered an error.' };
+    console.error('[Auth] registerPharmacy error:', err.message);
+    return { success: false, error: 'Failed to provision pharmacy. Please verify details and try again.' };
   }
 }
 
