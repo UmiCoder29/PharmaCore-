@@ -24,11 +24,13 @@ import {
   Phone,
   MapPin
 } from 'lucide-react';
+import { unwrapPlansResponse } from '../utils/planUtils.js';
 
 export default function SubscriptionScreen({ user, onBrandingUpdated }) {
   const [subData, setSubData] = useState(null);
   const [inquiries, setInquiries] = useState([]);
   const [plans, setPlans] = useState([]);
+  const [plansError, setPlansError] = useState('');
   const [selectedPlan, setSelectedPlan] = useState('professional');
   const [messageText, setMessageText] = useState('');
   const [sending, setSending] = useState(false);
@@ -60,7 +62,7 @@ export default function SubscriptionScreen({ user, onBrandingUpdated }) {
       const [sub, msgs, plansData, config] = await Promise.all([
         window.pharmacoreAPI.getCurrentSubscription().catch(err => ({ success: false, error: err.message })),
         window.pharmacoreAPI.getPharmacyInquiries().catch(() => []),
-        window.pharmacoreAPI.getSubscriptionPlans().catch(() => []),
+        window.pharmacoreAPI.getSubscriptionPlans().catch(err => ({ success: false, error: err?.message || 'Failed to load plans.' })),
         window.pharmacoreAPI.getPublicConfig().catch(() => null)
       ]);
 
@@ -88,8 +90,10 @@ export default function SubscriptionScreen({ user, onBrandingUpdated }) {
         }
       }
 
-      setInquiries(msgs || []);
-      setPlans(plansData || []);
+      const unwrapped = unwrapPlansResponse(plansData);
+      setPlans(unwrapped.plans);
+      setPlansError(unwrapped.error || '');
+      setInquiries(Array.isArray(msgs) ? msgs : (msgs?.data || []));
       setPublicConfig(config);
     } catch (err) {
       if (lastPollErrorRef.current !== err.message) {
@@ -535,13 +539,20 @@ export default function SubscriptionScreen({ user, onBrandingUpdated }) {
               <select
                 value={selectedPlan}
                 onChange={e => setSelectedPlan(e.target.value)}
-                className="w-full bg-clinical border border-ink/10 rounded-2xl px-3.5 py-2.5 text-xs font-semibold outline-none focus:border-emerald capitalize"
+                disabled={plans.length === 0}
+                className="w-full bg-clinical border border-ink/10 rounded-2xl px-3.5 py-2.5 text-xs font-semibold outline-none focus:border-emerald capitalize disabled:opacity-60"
               >
-                {plans.filter(p => p.slug !== 'trial').map(p => (
-                  <option key={p.id || p.slug} value={p.slug}>
-                    {p.name} ({p.currency || 'PKR'} {p.priceMonthly?.toLocaleString()} / mo)
-                  </option>
-                ))}
+                {plans.length === 0 ? (
+                  <option value="">{plansError ? 'Plans unavailable' : 'No plans available'}</option>
+                ) : (
+                  (Array.isArray(plans) ? plans : [])
+                    .filter(p => p && p.slug !== 'trial')
+                    .map(p => (
+                      <option key={p.id || p.slug} value={p.slug}>
+                        {p.name} ({p.currency || 'PKR'} {p.priceMonthly?.toLocaleString()} / mo)
+                      </option>
+                    ))
+                )}
               </select>
             </div>
 
@@ -616,51 +627,65 @@ export default function SubscriptionScreen({ user, onBrandingUpdated }) {
           <p className="text-xs font-semibold text-ink/60">Choose the right capacity for your growing pharmacy network</p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
-          {plans.map((plan) => {
-            const isCurrent = subData?.planTier === plan.slug;
-            return (
-              <div 
-                key={plan.id || plan.slug}
-                className={`bg-white rounded-3xl p-6 border shadow-sm flex flex-col justify-between ${
-                  isCurrent ? 'border-2 border-emerald ring-2 ring-emerald/20' : 'border-ink/10'
-                }`}
-              >
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h3 className="font-black text-lg text-ink">{plan.name}</h3>
-                    {isCurrent && (
-                      <span className="px-2.5 py-0.5 bg-emerald/10 text-emerald text-[11px] font-bold rounded-full">Current</span>
-                    )}
-                  </div>
-                  <p className="text-xs text-ink/60 min-h-[32px]">{plan.description}</p>
-                  
-                  <div className="py-2 border-y border-ink/5 font-mono text-xl font-black text-ink">
-                    {plan.priceMonthly === 0 ? 'Free' : `${plan.currency || 'PKR'} ${plan.priceMonthly?.toLocaleString()}`}
-                    {plan.priceMonthly > 0 && <span className="text-xs font-normal text-ink/50"> / mo</span>}
-                  </div>
+        {plansError ? (
+          <div className="bg-white rounded-3xl p-8 border border-rose-200 text-center space-y-2 shadow-sm">
+            <div className="w-12 h-12 bg-rose-50 text-rose-600 rounded-2xl flex items-center justify-center mx-auto mb-2">
+              <AlertCircle className="w-6 h-6" />
+            </div>
+            <p className="font-bold text-sm text-rose-700">{plansError}</p>
+            <p className="text-xs text-ink/60">Subscription plan information is temporarily unavailable.</p>
+          </div>
+        ) : plans.length === 0 ? (
+          <div className="bg-white rounded-3xl p-8 border border-ink/10 text-center text-ink/50 space-y-2 shadow-sm">
+            <p className="font-semibold text-sm">No subscription tiers available.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+            {(Array.isArray(plans) ? plans : []).map((plan) => {
+              const isCurrent = subData?.planTier === plan.slug;
+              return (
+                <div 
+                  key={plan.id || plan.slug}
+                  className={`bg-white rounded-3xl p-6 border shadow-sm flex flex-col justify-between ${
+                    isCurrent ? 'border-2 border-emerald ring-2 ring-emerald/20' : 'border-ink/10'
+                  }`}
+                >
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-black text-lg text-ink">{plan.name}</h3>
+                      {isCurrent && (
+                        <span className="px-2.5 py-0.5 bg-emerald/10 text-emerald text-[11px] font-bold rounded-full">Current</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-ink/60 min-h-[32px]">{plan.description}</p>
+                    
+                    <div className="py-2 border-y border-ink/5 font-mono text-xl font-black text-ink">
+                      {plan.priceMonthly === 0 ? 'Free' : `${plan.currency || 'PKR'} ${plan.priceMonthly?.toLocaleString()}`}
+                      {plan.priceMonthly > 0 && <span className="text-xs font-normal text-ink/50"> / mo</span>}
+                    </div>
 
-                  <ul className="space-y-2 text-xs text-ink/80 font-medium">
-                    <li className="flex items-center gap-2">
-                      <Check className="w-4 h-4 text-emerald shrink-0" />
-                      <span>{plan.maxBranches > 50 ? 'Unlimited Branches' : `${plan.maxBranches} Branch Locations`}</span>
-                    </li>
-                    <li className="flex items-center gap-2">
-                      <Check className="w-4 h-4 text-emerald shrink-0" />
-                      <span>{plan.maxUsers > 50 ? 'Unlimited Users' : `${plan.maxUsers} Staff Accounts`}</span>
-                    </li>
-                    {(Array.isArray(plan.features) ? plan.features : []).slice(0, 4).map((f, i) => (
-                      <li key={i} className="flex items-center gap-2 truncate">
+                    <ul className="space-y-2 text-xs text-ink/80 font-medium">
+                      <li className="flex items-center gap-2">
                         <Check className="w-4 h-4 text-emerald shrink-0" />
-                        <span className="truncate">{f}</span>
+                        <span>{plan.maxBranches > 50 ? 'Unlimited Branches' : `${plan.maxBranches} Branch Locations`}</span>
                       </li>
-                    ))}
-                  </ul>
+                      <li className="flex items-center gap-2">
+                        <Check className="w-4 h-4 text-emerald shrink-0" />
+                        <span>{plan.maxUsers > 50 ? 'Unlimited Users' : `${plan.maxUsers} Staff Accounts`}</span>
+                      </li>
+                      {(Array.isArray(plan.features) ? plan.features : []).slice(0, 4).map((f, i) => (
+                        <li key={i} className="flex items-center gap-2 truncate">
+                          <Check className="w-4 h-4 text-emerald shrink-0" />
+                          <span className="truncate">{f}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
