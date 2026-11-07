@@ -1,6 +1,7 @@
 # Milestone 1 Security Checklist & Audit Report
 
 **Date**: 2026-11-02  
+**Updated**: 2026-11-07 (updated after live runs reported by reviewer)  
 **Repository**: PharmaCore (`UmiCoder29/PharmaCore-`)  
 **Commit Inspected**: `597017356b01912c1097662265943512955c10ec`  
 **Auditor**: Antigravity Automated Verification Agent  
@@ -16,7 +17,7 @@
 | **Secrets: JWT Strings** | `git log -p -G "eyJ[a-zA-Z0-9_\-]{30,}"` across all commits & `git grep -E "eyJ[a-zA-Z0-9_\-]{30,}"` | **PASS** | Zero JWT credentials exist in git history or working tree (both commands returned 0 output). All test JWT tokens in unit tests are synthesized dynamically in-memory via test helpers (`makeMockJwt`). |
 | **Secrets: Private Key Headers** | `git log -p -G "BEGIN.*PRIVATE KEY"` across all commits & `git grep -i "PRIVATE KEY"` | **PASS** | Zero private key headers or blocks found in git history or tree (command returned 0 output; grep matched only the `.gitignore` category header comment). |
 | **Secrets: `service_role` as value** | `git log -S "service_role"` across all commits & `git grep -n "service_role"` | **PASS** | `service_role` appears exclusively as a PostgreSQL role name in SQL migrations (`GRANT ... TO service_role`), RLS bypass checks (`auth.role() = 'service_role'`), config validation rejection guards (`electron/config.js:134`), and the Edge Function environment variable name `SUPABASE_SERVICE_ROLE_KEY`. Never used as a secret credential value in client code. |
-| **Old Project IDs (`*.supabase.co`)** | `git log --all -p` extraction of all `*.supabase.co` hostnames | **FAIL (Finding)** | 14 distinct hostnames appear in commit history (all placeholder/mock domains; none match live project `guomtiflloytteecjtcp.supabase.co`). Flagged as a finding per audit condition 1. |
+| **Old Project IDs (`*.supabase.co`)** | `git log --all -p` extraction of all `*.supabase.co` hostnames | **PASS** | The reviewer independently enumerated every *.supabase.co hostname from the git history and confirmed all 14 are placeholders or test fixtures, and that the live host guomtiflloytteecjtcp.supabase.co was never committed. |
 | **Secrets: `Admin@12345`** | `git log -p -S "Admin@12345"` across all commits & `git grep "Admin@12345"` | **PASS** | Zero occurrences in commit history or working tree (commands returned empty output). |
 | **Secrets: `password123`** | `git log -S "password123"` across all commits & `git grep -n "password123"` | **PASS** | Appears strictly in commit `cdc6a28` as an entry in `COMMON_WEAK_PASSWORDS` blocklists (`electron/auth.js:33`, `src/components/LoginScreen.jsx:6`, `tests/first-login-password.test.js:268`) to reject weak user passwords during account setup and password change. Never used as a credential. |
 | **Secrets: Email/Password Pairs** | `git grep -i -E "email.*password\|password.*email"` across history & tree | **PASS** | No plaintext email + password credentials pair found. Matches are limited to UI login error strings (`'Invalid email or password.'`), unit test payload mocks, and legacy database seed scripts using `crypt(gen_random_uuid()::text, gen_salt('bf'))`. |
@@ -31,40 +32,40 @@
 | **Repo Hygiene: `.gitignore` Coverage** | Inspected `.gitignore` lines 1–60 | **PASS** | Explicit ignore rules for `dist/`, `release/`, `*.exe`, `*.msi`, `*.dmg`, `.env`, `.env.*`, `*.db`, `*.sqlite`, `runtime-config.json`, `electron/runtime-config.json`, `*.pem`, `*.key`. |
 | **Repo Hygiene: Large Files (>5 MB)** | File size audit across all `git ls-files` and shipping bundle files | **PASS** | Zero tracked or shipping files over 5 MB. Largest tracked file is `package-lock.json` (277 KB). `dist/` exists in the repo and its largest file is `dist/assets/index-nhQ4XGxT.js` (604 KB). |
 | **Database: Migration Inventory** | `Get-ChildItem -File supabase/migrations/*.sql` sorted by name | **PASS** | Exactly 9 sequential migrations present in repository in filename order. |
-| **Database: SECURITY DEFINER Search Paths** | Inspected all 15 `SECURITY DEFINER` functions across migrations | **PASS** | 100% of `SECURITY DEFINER` functions declare a fixed search_path (`SET search_path = public` or `SET search_path = public, pg_temp`). |
+| **Database: SECURITY DEFINER Search Paths** | Inspected all 15 `SECURITY DEFINER` functions across migrations | **PASS** | 100% of `SECURITY DEFINER` functions declare a fixed search_path (`SET search_path = public` or `SET search_path = public, pg_temp`). The reviewer queried the live project and found 16 SECURITY DEFINER functions, all with a fixed search_path and none executable by anon; the 16th, rls_auto_enable, is a Supabase platform built-in that is not in the repo migrations and is executable by the service role only; the functions executable by authenticated are exactly the 11 approved ones. |
 | **Database: Authenticated Grants vs Audit List** | Compared migration `GRANT EXECUTE ... TO authenticated` with `supabase/tests/rls_suite.sql:1050-1054` | **PASS** | Exactly 11 functions granted to `authenticated`, matching the 11 approved routines in `rls_suite.sql` with 0 mismatches. |
 | **Edge Function: JWT Verification Enabled** | Inspected `supabase/config.toml` lines 3–4 | **PASS** | `[functions.provision-pharmacy]` configures `verify_jwt = true`. |
 | **Edge Function: SuperAdmin Authorization** | Inspected `supabase/functions/provision-pharmacy/index.ts` lines 160–185 | **PASS** | Validates session JWT via `auth.getUser()`, queries `app_users` under caller token, and rejects non-superadmins with HTTP 403. |
 | **Edge Function: Secret & Password Logging** | Inspected all `console.` calls in `provision-pharmacy/index.ts` | **PASS** | Temporary password and service keys are never passed to logger in any branch (success, failure, or compensating rollback). |
 | **Edge Function: Email Enumeration Prevention** | Inspected `provision-pharmacy/index.ts` lines 372–381 | **PASS** | Returns uniform generic error `Unable to provision pharmacy with the provided information. Please verify input details and try again.` when user creation fails. |
-| **Live Database: Cross-Tenant RLS Suite** | Execution of `supabase/tests/rls_suite.sql` against live PostgreSQL | **NOT RUN: needs the live database, will be run by the reviewer** | Requires live Supabase connection (psql/dashboard SQL editor). |
-| **Live Database: First-Login Flag Suite** | Execution of `supabase/tests/first_login_flag_suite.sql` against live PostgreSQL | **NOT RUN: needs the live database, will be run by the reviewer** | Requires live Supabase connection (psql/dashboard SQL editor). |
-| **Live Database: Provisioning RPC Suite** | Execution of `supabase/tests/provision_pharmacy_suite.sql` against live PostgreSQL | **NOT RUN: needs the live database, will be run by the reviewer** | Requires live Supabase connection (psql/dashboard SQL editor). |
-| **Live Database: Verify Setup Script** | Execution of `npm run verify-setup` with live environment credentials | **NOT RUN: needs the live database, will be run by the reviewer** | Requires live `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. |
+| **Live Database: Cross-Tenant RLS Suite** | Execution of `supabase/tests/rls_suite.sql` against live PostgreSQL | **PASS** | SUITE_RESULT PASS, 402 checks, 400 passed, 0 failed, 2 known accepted gaps (duplicate return of the same sale item, and an admin updating sales in their own pharmacy; both belong to Milestone 3). All 19 tables blocked cross-tenant for both admin and pharmacist. Everything rolled back (reported by the reviewer, run live at repo commit 8d66c31). |
+| **Live Database: First-Login Flag Suite** | Execution of `supabase/tests/first_login_flag_suite.sql` against live PostgreSQL | **PASS** | 19 of 19 passed. Everything rolled back (reported by the reviewer, run live at repo commit 5970173). |
+| **Live Database: Provisioning RPC Suite** | Execution of `supabase/tests/provision_pharmacy_suite.sql` against live PostgreSQL | **PASS** | 34 of 34 passed. Everything rolled back (reported by the reviewer, run live at repo commit 8d66c31). |
+| **Live Database: Verify Setup Script** | Execution of `npm run verify-setup` with live environment credentials | **PASS** | 81 of 81 passed, 0 failed or inconclusive (reported by the reviewer, run live on reviewer's machine). |
 
 ---
 
-## 2. Reviewer Action Items (FAIL and NOT RUN Details)
+## 2. Reviewer Notes
 
-### FAIL 1: Distinct `*.supabase.co` Hostnames in Git History
-Per Condition 1 of Prompt 1.10, every distinct `*.supabase.co` hostname appearing anywhere in git history was extracted along with the earliest commit in which it appears. All 14 hostnames differ from the live project ID (`guomtiflloytteecjtcp.supabase.co`):
+### Note: hostnames found in git history
+Every distinct `*.supabase.co` hostname appearing anywhere in git history was extracted along with the earliest commit in which it appears. All 14 hostnames differ from the live project ID (`guomtiflloytteecjtcp.supabase.co`):
 
 | Hostname | First Commit | Description | Status |
 | :--- | :--- | :--- | :---: |
-| `abcdefghij.supabase.co` | `84563df` | Initial UI mockup placeholder | Finding (Mock) |
-| `abcdefghijklm.supabase.co` | `206ad24` | Config validation test fixture | Finding (Test) |
-| `build-time.supabase.co` | `206ad24` | Config packaging test fixture | Finding (Test) |
-| `demo-project.supabase.co` | `206ad24` | Config validation test fixture | Finding (Test) |
-| `dev-env.supabase.co` | `206ad24` | Config packaging test fixture | Finding (Test) |
-| `hostile-override.supabase.co` | `206ad24` | Config security override test | Finding (Test) |
-| `packaged-app.supabase.co` | `206ad24` | Config packaging test fixture | Finding (Test) |
-| `project.supabase.co` | `84563df` | Documentation / test URL | Finding (Doc) |
-| `testproject.supabase.co` | `ead3647` | verify-setup mock test fixture | Finding (Test) |
-| `valid-in-env.supabase.co` | `752e526` | Startup lifecycle test fixture | Finding (Test) |
-| `xyz.supabase.co` | `81e9255` | SETUP.md CLI placeholder example | Finding (Doc) |
-| `xyz-123_proj.supabase.co` | `206ad24` | Config validation test fixture | Finding (Test) |
-| `xyzcompany.supabase.co` | `84563df` | Initial UI mockup placeholder | Finding (Mock) |
-| `your-project.supabase.co` | `84563df` | README / TESTS.md placeholder | Finding (Doc) |
+| `abcdefghij.supabase.co` | `84563df` | Initial UI mockup placeholder | Placeholder / test fixture |
+| `abcdefghijklm.supabase.co` | `206ad24` | Config validation test fixture | Placeholder / test fixture |
+| `build-time.supabase.co` | `206ad24` | Config packaging test fixture | Placeholder / test fixture |
+| `demo-project.supabase.co` | `206ad24` | Config validation test fixture | Placeholder / test fixture |
+| `dev-env.supabase.co` | `206ad24` | Config packaging test fixture | Placeholder / test fixture |
+| `hostile-override.supabase.co` | `206ad24` | Config security override test | Placeholder / test fixture |
+| `packaged-app.supabase.co` | `206ad24` | Config packaging test fixture | Placeholder / test fixture |
+| `project.supabase.co` | `84563df` | Documentation / test URL | Placeholder / test fixture |
+| `testproject.supabase.co` | `ead3647` | verify-setup mock test fixture | Placeholder / test fixture |
+| `valid-in-env.supabase.co` | `752e526` | Startup lifecycle test fixture | Placeholder / test fixture |
+| `xyz.supabase.co` | `81e9255` | SETUP.md CLI placeholder example | Placeholder / test fixture |
+| `xyz-123_proj.supabase.co` | `206ad24` | Config validation test fixture | Placeholder / test fixture |
+| `xyzcompany.supabase.co` | `84563df` | Initial UI mockup placeholder | Placeholder / test fixture |
+| `your-project.supabase.co` | `84563df` | README / TESTS.md placeholder | Placeholder / test fixture |
 
 *Reviewer Verification Command*:
 ```bash
@@ -113,43 +114,12 @@ npm audit
 
 ---
 
-### NOT RUN 1: Live Database Cross-Tenant RLS Test Suite
-- **File**: [`supabase/tests/rls_suite.sql`](file:///e:/POSsystem/supabase/tests/rls_suite.sql)
-- **Reviewer Command**:
-  ```bash
-  # In Supabase SQL Editor as role postgres:
-  # Paste contents of supabase/tests/rls_suite.sql and click Run
-  ```
-- **Expected Result**: Transaction terminates with `RAISE EXCEPTION` carrying `RLS_SUITE: PASS` with 0 failures, rolling back all test records atomically.
+All verification checks have now been run.
 
 ---
 
-### NOT RUN 2: Live Database First-Login Flag Test Suite
-- **File**: [`supabase/tests/first_login_flag_suite.sql`](file:///e:/POSsystem/supabase/tests/first_login_flag_suite.sql)
-- **Reviewer Command**:
-  ```bash
-  # In Supabase SQL Editor as role postgres:
-  # Paste contents of supabase/tests/first_login_flag_suite.sql and click Run
-  ```
-- **Expected Result**: Transaction terminates with `RAISE EXCEPTION` carrying `FIRST_LOGIN_FLAG_SUITE: PASS (Total: 19, Passed: 19, Failed: 0)` with 0 failures, rolling back all test fixtures atomically.
+## 3. Open findings
 
----
-
-### NOT RUN 3: Live Database Provisioning RPC Test Suite
-- **File**: [`supabase/tests/provision_pharmacy_suite.sql`](file:///e:/POSsystem/supabase/tests/provision_pharmacy_suite.sql)
-- **Reviewer Command**:
-  ```bash
-  # In Supabase SQL Editor as role postgres:
-  # Paste contents of supabase/tests/provision_pharmacy_suite.sql and click Run
-  ```
-- **Expected Result**: Transaction terminates with `RAISE EXCEPTION` carrying `PROVISION_PHARMACY_SUITE: PASS` with 0 failures, rolling back all test fixtures atomically.
-
----
-
-### NOT RUN 4: Live Environment Setup Verification Script
-- **Script**: [`scripts/verify-setup.mjs`](file:///e:/POSsystem/scripts/verify-setup.mjs)
-- **Reviewer Command**:
-  ```bash
-  SUPABASE_URL="https://guomtiflloytteecjtcp.supabase.co" SUPABASE_PUBLISHABLE_KEY="<live-publishable-key>" npm run verify-setup
-  ```
-- **Expected Result**: All 81 security boundary checks pass (`Result: PASS`).
+- **Unused production dependencies**: `express`, `cors`, and `pg` remain listed as production dependencies in `package.json`. They cause all three production vulnerabilities reported by `npm audit` (1 critical in `proxy-addr` via `express`, 1 high in `body-parser` via `express`, 1 moderate).
+- **RLS test suite known accepted gaps**: 2 known accepted gaps reported by the reviewer in `supabase/tests/rls_suite.sql` (duplicate return of the same sale item, and an admin updating sales in their own pharmacy; both belong to Milestone 3).
+- **Dev-only vulnerabilities**: Breaking changes from `npm audit` in developer and packaging dependencies (Group B: `tar`, `electron`, `electron-builder`, `app-builder-lib`, `builder-util`, `builder-util-runtime`, `dmg-builder`, `extract-zip`, `vite`) and dev tooling (Group C: `shell-quote`, `@xmldom/xmldom`, `axios`, `follow-redirects`, `joi`, etc.) to be resolved in a future dependency update.
