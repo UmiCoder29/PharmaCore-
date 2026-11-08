@@ -1,11 +1,12 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { parse } from '@babel/parser';
 import traverseModule from '@babel/traverse';
 
 const traverse = traverseModule.default || traverseModule;
 
-const KNOWN_GLOBALS = new Set([
+export const KNOWN_GLOBALS = new Set([
   'window', 'document', 'console', 'setTimeout', 'setInterval', 'clearInterval', 'clearTimeout',
   'Date', 'Math', 'JSON', 'Promise', 'FileReader', 'URL', 'alert', 'confirm', 'prompt',
   'parseFloat', 'parseInt', 'isNaN', 'isFinite', 'Infinity', 'NaN', 'undefined',
@@ -18,7 +19,72 @@ const KNOWN_GLOBALS = new Set([
   'HTMLInputElement', 'HTMLElement', 'Element', 'Node'
 ]);
 
-function getFilesRecursively(dir) {
+export function scanSource(code, file = 'anonymous.jsx') {
+  const issues = [];
+  let ast;
+  try {
+    ast = parse(code, {
+      sourceType: 'module',
+      plugins: ['jsx', 'classProperties', 'optionalChaining', 'nullishCoalescingOperator']
+    });
+  } catch (err) {
+    issues.push({ file, line: err.loc?.line, name: 'PARSER_ERROR', message: err.message });
+    return issues;
+  }
+
+  traverse(ast, {
+    Identifier(path) {
+      if (!path.isReferencedIdentifier()) return;
+
+      const name = path.node.name;
+      if (KNOWN_GLOBALS.has(name) || name === 'React') return;
+
+      if (!path.scope.hasBinding(name)) {
+        issues.push({
+          file,
+          line: path.node.loc?.start?.line,
+          column: path.node.loc?.start?.column,
+          name
+        });
+      }
+    },
+
+    JSXOpeningElement(path) {
+      let rootNode = path.node.name;
+      let isMemberExpression = false;
+
+      while (rootNode.type === 'JSXMemberExpression') {
+        rootNode = rootNode.object;
+        isMemberExpression = true;
+      }
+
+      if (rootNode.type === 'JSXIdentifier') {
+        const name = rootNode.name;
+
+        // Skip plain lowercase native HTML/SVG tags like <div>, <span>, <select>, etc.
+        // For JSXMemberExpression tags like <motion.div>, root is checked regardless of case.
+        if (!isMemberExpression && /^[a-z]/.test(name)) {
+          return;
+        }
+
+        if (KNOWN_GLOBALS.has(name) || name === 'React') return;
+
+        if (!path.scope.hasBinding(name)) {
+          issues.push({
+            file,
+            line: rootNode.loc?.start?.line,
+            column: rootNode.loc?.start?.column,
+            name
+          });
+        }
+      }
+    }
+  });
+
+  return issues;
+}
+
+export function getFilesRecursively(dir) {
   let results = [];
   const list = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of list) {
@@ -32,48 +98,22 @@ function getFilesRecursively(dir) {
   return results;
 }
 
-const srcDir = path.resolve('src');
-const files = getFilesRecursively(srcDir);
-const issues = [];
-
-for (const file of files) {
-  const code = fs.readFileSync(file, 'utf-8');
-  let ast;
-  try {
-    ast = parse(code, {
-      sourceType: 'module',
-      plugins: ['jsx', 'classProperties', 'optionalChaining', 'nullishCoalescingOperator']
-    });
-  } catch (err) {
-    issues.push({ file, line: err.loc?.line, name: 'PARSER_ERROR', message: err.message });
-    continue;
+export function scanDirectory(dir = path.resolve('src')) {
+  const files = getFilesRecursively(dir);
+  const issues = [];
+  for (const file of files) {
+    const code = fs.readFileSync(file, 'utf-8');
+    const fileIssues = scanSource(code, path.relative('.', file));
+    issues.push(...fileIssues);
   }
-
-  traverse(ast, {
-    Identifier(path) {
-      if (!path.isReferencedIdentifier()) return;
-
-      const name = path.node.name;
-      if (KNOWN_GLOBALS.has(name)) return;
-
-      // Check if binding exists in current or any parent scope
-      if (!path.scope.hasBinding(name)) {
-        // Exclude JSX pragma if implicit
-        if (name === 'React') return;
-
-        issues.push({
-          file: path.relative ? path.relative : file,
-          line: path.node.loc?.start?.line,
-          column: path.node.loc?.start?.column,
-          name
-        });
-      }
-    }
-  });
+  return issues;
 }
 
-console.log(JSON.stringify(issues, null, 2));
-
-if (issues.length > 0) {
-  process.exit(1);
+const isCLI = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+if (isCLI) {
+  const issues = scanDirectory();
+  console.log(JSON.stringify(issues, null, 2));
+  if (issues.length > 0) {
+    process.exit(1);
+  }
 }
