@@ -925,7 +925,7 @@ export default function SaasAdminScreen({ user }) {
               {/* Section 2: Capacity Quotas */}
               <div className="bg-slate-50/80 border border-slate-200/90 rounded-2xl p-4 space-y-3">
                 <div className="flex items-center gap-2 text-slate-800 font-extrabold text-[11px] uppercase tracking-wider">
-                  <Building className="w-3.5 h-3.5 text-emerald-600" />
+                  <Building2 className="w-3.5 h-3.5 text-emerald-600" />
                   <span>2. Branch & User Capacity Limits</span>
                 </div>
 
