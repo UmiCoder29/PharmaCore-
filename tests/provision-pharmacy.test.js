@@ -121,9 +121,24 @@ describe('Provision Pharmacy Unit & Integration Tests', () => {
       assert.match(msg, /between 2 and 100 characters/i);
     });
 
-    it('defaults to safe message mentioning owner email may already be registered (Amendment 4)', () => {
+    it('maps HTTP 409 or email_taken code to duplicate owner email message', () => {
+      const msg409 = mapProvisioningError(409, 'An account with this email address already exists.', 'email_taken');
+      assert.equal(
+        msg409,
+        'This owner email is already registered. Use a different email, or ask the existing owner to reset their password.'
+      );
+
+      const msgCodeOnly = mapProvisioningError(400, 'Custom error', 'email_taken');
+      assert.equal(
+        msgCodeOnly,
+        'This owner email is already registered. Use a different email, or ask the existing owner to reset their password.'
+      );
+    });
+
+    it('defaults to honest generic message without speculative email mention', () => {
       const msg = mapProvisioningError(500, 'Internal Server Error');
-      assert.match(msg, /owner login email may already be registered/i);
+      assert.equal(msg, 'Could not create the pharmacy. Please check the details and try again.');
+      assert.doesNotMatch(msg, /owner login email/i);
       assert.doesNotMatch(msg, /Internal Server Error/);
     });
 
@@ -453,6 +468,50 @@ describe('Provision Pharmacy Unit & Integration Tests', () => {
       assert.equal(res.success, false);
       assert.equal(callCount, 2, 'Should have attempted once and retried once');
       assert.match(res.error, /username is already taken/i);
+    });
+
+    it('Amendment 4: email_taken response (409) does NOT trigger username retry and calls invoke exactly once', async () => {
+      let callCount = 0;
+
+      const mockSupabase = {
+        auth: {
+          getSession: async () => ({
+            data: { session: { access_token: 'valid-token' } }
+          })
+        },
+        functions: {
+          invoke: async () => {
+            callCount++;
+            const error = new Error('Edge Function returned a non-2xx status code');
+            error.context = {
+              status: 409,
+              json: async () => ({
+                success: false,
+                code: 'email_taken',
+                error: 'An account with this email address already exists.'
+              })
+            };
+            return { data: null, error };
+          }
+        }
+      };
+
+      _setSupabaseClientForTesting(mockSupabase);
+
+      const res = await registerPharmacy({
+        pharmacyName: 'Duplicate Email Pharmacy',
+        adminEmail: 'existing@pharma.com',
+        adminUsername: 'new_owner'
+      });
+
+      assert.equal(res.success, false);
+      assert.equal(callCount, 1, 'Edge function must be called exactly once; username retry must NOT be triggered on email_taken');
+      assert.equal(res.code, 'email_taken');
+      assert.equal(res.errorField, 'email');
+      assert.equal(
+        res.error,
+        'This owner email is already registered. Use a different email, or ask the existing owner to reset their password.'
+      );
     });
 
     it('Correctly reads server error message from error.context.json() response', async () => {

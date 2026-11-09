@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Building2, 
   Users, 
@@ -9,6 +9,7 @@ import {
   Clock, 
   CheckCircle2, 
   AlertTriangle, 
+  AlertCircle,
   XCircle, 
   MoreVertical, 
   RefreshCw, 
@@ -52,8 +53,12 @@ export default function SaasAdminScreen({ user }) {
   const [selectedPharmacy, setSelectedPharmacy] = useState(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [notification, setNotification] = useState({ message: '', type: '' });
+  const [modalError, setModalError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
   const [provisionedCredentials, setProvisionedCredentials] = useState(null);
   const [copied, setCopied] = useState(false);
+  const emailInputRef = useRef(null);
+  const modalErrorRef = useRef(null);
 
   // Create Pharmacy Form
   const [formData, setFormData] = useState({
@@ -117,6 +122,9 @@ export default function SaasAdminScreen({ user }) {
   const handleCreatePharmacy = async (e) => {
     e.preventDefault();
     setActionLoading(true);
+    setModalError('');
+    setFieldErrors({});
+
     try {
       const res = await window.pharmacoreAPI.createPharmacy({
         pharmacyName: formData.pharmacyName,
@@ -129,6 +137,8 @@ export default function SaasAdminScreen({ user }) {
         planTier: formData.planTier
       });
       if (res.success) {
+        setModalError('');
+        setFieldErrors({});
         showNotice(`Pharmacy "${formData.pharmacyName}" provisioned successfully!`);
         setShowCreateModal(false);
         setProvisionedCredentials({
@@ -151,10 +161,17 @@ export default function SaasAdminScreen({ user }) {
         });
         fetchData();
       } else {
-        showNotice(res.error || 'Failed to create pharmacy tenant. The owner login email may already be registered.', 'error');
+        const errMsg = res.error || 'Could not create the pharmacy. Please check the details and try again.';
+        setModalError(errMsg);
+        if (res.code === 'email_taken' || res.errorField === 'email' || errMsg.toLowerCase().includes('already registered')) {
+          setFieldErrors({ email: 'This email is already registered.' });
+          setTimeout(() => emailInputRef.current?.focus(), 50);
+        }
+        setTimeout(() => modalErrorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
       }
     } catch (err) {
-      showNotice(err.message || 'Error provisioning pharmacy.', 'error');
+      setModalError(err.message || 'Error provisioning pharmacy.');
+      setTimeout(() => modalErrorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
     } finally {
       setActionLoading(false);
     }
@@ -587,12 +604,28 @@ export default function SaasAdminScreen({ user }) {
                 </div>
               </div>
               <button
-                onClick={() => setShowCreateModal(false)}
+                onClick={() => {
+                  setModalError('');
+                  setFieldErrors({});
+                  setShowCreateModal(false);
+                }}
                 className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center font-bold text-sm transition-all"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {modalError && (
+              <div
+                ref={modalErrorRef}
+                role="alert"
+                aria-live="assertive"
+                className="mx-6 sm:mx-8 mt-4 p-3.5 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold rounded-2xl flex items-center gap-2.5 shadow-sm"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                <span className="flex-1 leading-relaxed">{modalError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleCreatePharmacy} className="p-6 sm:p-8 space-y-4 max-h-[calc(85vh-140px)] overflow-y-auto custom-scrollbar text-xs">
               {/* Section 1: Business Identity */}
@@ -643,13 +676,28 @@ export default function SaasAdminScreen({ user }) {
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">Owner login email *</label>
                     <input
+                      ref={emailInputRef}
                       type="email"
                       required
                       placeholder="owner@pharmacy.com"
                       value={formData.email}
-                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                      className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-bold text-slate-900 outline-none focus:border-emerald-600 shadow-sm"
+                      onChange={(e) => {
+                        if (modalError) setModalError('');
+                        if (fieldErrors.email) setFieldErrors(prev => ({ ...prev, email: null }));
+                        setFormData({ ...formData, email: e.target.value });
+                      }}
+                      className={`w-full bg-white border ${
+                        fieldErrors.email
+                          ? 'border-rose-500 focus:border-rose-600 focus:ring-1 focus:ring-rose-500'
+                          : 'border-slate-300 focus:border-emerald-600'
+                      } rounded-xl px-3.5 py-2 text-xs font-bold text-slate-900 outline-none shadow-sm`}
                     />
+                    {fieldErrors.email && (
+                      <p className="text-rose-600 text-[11px] font-semibold mt-1 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3 shrink-0" />
+                        <span>{fieldErrors.email}</span>
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>

@@ -264,27 +264,32 @@ export function appendNumericSuffix(username) {
 /**
  * Maps status code and server error message to a concise, user-friendly message.
  */
-export function mapProvisioningError(statusCode, serverMessage) {
-  const lower = (serverMessage || '').toLowerCase();
-  if (statusCode === 429 || lower.includes('rate limit')) {
+export function mapProvisioningError(statusCode, serverMessage, serverCode) {
+  const lowerMsg = (serverMessage || '').toLowerCase();
+  const lowerCode = (serverCode || '').toLowerCase();
+
+  if (statusCode === 409 || lowerCode === 'email_taken' || lowerMsg.includes('email_taken')) {
+    return 'This owner email is already registered. Use a different email, or ask the existing owner to reset their password.';
+  }
+  if (statusCode === 429 || lowerMsg.includes('rate limit')) {
     return 'Provisioning rate limit reached (maximum 10 per hour). Please wait before trying again.';
   }
-  if (statusCode === 403 || lower.includes('forbidden') || lower.includes('superadmin access required')) {
+  if (statusCode === 403 || lowerMsg.includes('forbidden') || lowerMsg.includes('superadmin access required')) {
     return 'Access denied: SuperAdmin permission required.';
   }
-  if (lower.includes('already taken') || lower.includes('username is already taken')) {
+  if (lowerMsg.includes('already taken') || lowerMsg.includes('username is already taken')) {
     return 'Admin username is already taken. Please choose a different username.';
   }
-  if (lower.includes('invalid email') || lower.includes('email address format')) {
+  if (lowerMsg.includes('invalid email') || lowerMsg.includes('email address format')) {
     return 'Invalid owner login email address format.';
   }
-  if (lower.includes('plan') || lower.includes('subscription plan')) {
+  if (lowerMsg.includes('plan') || lowerMsg.includes('subscription plan')) {
     return 'Invalid or inactive subscription plan selected.';
   }
-  if (lower.includes('pharmacy name')) {
+  if (lowerMsg.includes('pharmacy name')) {
     return 'Pharmacy name must be between 2 and 100 characters.';
   }
-  return 'Failed to provision pharmacy. The owner login email may already be registered, or input details are invalid.';
+  return 'Could not create the pharmacy. Please check the details and try again.';
 }
 
 /**
@@ -301,6 +306,7 @@ async function callProvisionEdgeFunction(supabase, sessionToken, payload) {
   if (error) {
     let statusCode = 500;
     let serverMessage = '';
+    let serverCode = '';
 
     if (error.context) {
       if (typeof error.context.status === 'number') {
@@ -309,6 +315,7 @@ async function callProvisionEdgeFunction(supabase, sessionToken, payload) {
       if (typeof error.context.json === 'function') {
         try {
           const body = await error.context.json();
+          serverCode = body?.code || '';
           serverMessage = body?.error || body?.message || '';
         } catch (_) {
           try {
@@ -323,7 +330,7 @@ async function callProvisionEdgeFunction(supabase, sessionToken, payload) {
       serverMessage = error.message || '';
     }
 
-    return { success: false, statusCode, serverMessage };
+    return { success: false, statusCode, serverMessage, serverCode };
   }
 
   return { success: true, data };
@@ -389,10 +396,12 @@ export async function registerPharmacy(pharmacyData) {
 
     let res = await callProvisionEdgeFunction(supabase, sessionToken, payload);
 
-    // If username is taken, retry ONCE with a short numeric suffix
+    // If username is taken, retry ONCE with a short numeric suffix.
+    // Duplicate email errors (HTTP 409 / email_taken) must NEVER trigger the username retry branch.
     let usernameAdjusted = false;
     let finalUsername = adminUsername;
-    if (!res.success && (res.serverMessage.toLowerCase().includes('already taken') || res.serverMessage.toLowerCase().includes('username'))) {
+    const isEmailTaken = res.statusCode === 409 || res.serverCode === 'email_taken';
+    if (!res.success && !isEmailTaken && (res.serverMessage.toLowerCase().includes('already taken') || res.serverMessage.toLowerCase().includes('username'))) {
       finalUsername = appendNumericSuffix(adminUsername);
       const retryPayload = { ...payload, adminUsername: finalUsername };
       const retryRes = await callProvisionEdgeFunction(supabase, sessionToken, retryPayload);
@@ -403,9 +412,12 @@ export async function registerPharmacy(pharmacyData) {
     }
 
     if (!res.success) {
+      const isDuplicateEmail = res.statusCode === 409 || res.serverCode === 'email_taken';
       return {
         success: false,
-        error: mapProvisioningError(res.statusCode, res.serverMessage)
+        error: mapProvisioningError(res.statusCode, res.serverMessage, res.serverCode),
+        code: res.serverCode || (isDuplicateEmail ? 'email_taken' : undefined),
+        errorField: isDuplicateEmail ? 'email' : undefined
       };
     }
 
