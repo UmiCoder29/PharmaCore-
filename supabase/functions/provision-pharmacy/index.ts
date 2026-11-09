@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { classifyCreateUserError } from "./errorClassifier.ts";
 
 // ─── HTTP Headers ────────────────────────────────────────────────────────────
 const responseHeaders = {
@@ -373,10 +374,16 @@ Deno.serve(async (req: Request) => {
     await recordAttempt(callerProfile.id, "auth_user_failed");
     // Internal log without exposing the password
     console.error("[provision-pharmacy] auth.admin.createUser failed:", createAuthErr?.message);
-    // Uniform response to prevent user enumeration
-    return jsonResponse(400, {
+
+    // Superadmin-only endpoint: Returning an explicit duplicate-email code here is safe because
+    // this function is restricted to verified platform superadmins and is strictly rate-limited.
+    // This allows the desktop admin UI to pinpoint the conflict and guide the superadmin without
+    // generic guesswork. This does not apply to public (anon) endpoints where user enumeration must be prevented.
+    const classified = classifyCreateUserError(createAuthErr);
+    return jsonResponse(classified.httpStatus, {
       success: false,
-      error: "Unable to provision pharmacy with the provided information. Please verify input details and try again.",
+      code: classified.code,
+      error: classified.error,
     });
   }
 
