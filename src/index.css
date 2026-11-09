@@ -103,9 +103,20 @@ body::before {
   input[type="email"],
   select,
   textarea {
-    @apply transition-all duration-200 border outline-none rounded-md px-3 py-2;
+    @apply transition-all duration-200 border outline-none rounded-md;
     border-color: var(--color-border);
     background-color: #F8FAFC;
+  }
+
+  :where(
+    input[type="text"],
+    input[type="number"],
+    input[type="password"],
+    input[type="email"],
+    select,
+    textarea
+  ) {
+    @apply px-3 py-2;
   }
 
   input:focus,
