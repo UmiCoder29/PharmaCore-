@@ -1,20 +1,7 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import gsap from 'gsap';
 import { Store, Lock, User, Sparkles, ArrowRight, KeyRound, ShieldAlert } from 'lucide-react';
-
-const COMMON_WEAK_PASSWORDS = new Set([
-  'password123',
-  'password1234',
-  '1234567890',
-  'admin12345',
-  'adminpassword',
-  'pharmacore1',
-  'pharmacore123',
-  'welcome1234',
-  'letmein1234',
-  'changeme123',
-  'iloveyou123'
-]);
+import { validatePassword } from '../../electron/passwordPolicy.js';
 
 export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
   const [username, setUsername] = useState('');
@@ -93,20 +80,13 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
     setChangePasswordError('');
 
     if (!passwordAlreadyChanged) {
-      if (!newPassword || typeof newPassword !== 'string' || !newPassword.trim()) {
-        setChangePasswordError('Password cannot be blank or made only of spaces.');
-        return;
-      }
-      if (newPassword.length < 10) {
-        setChangePasswordError('Password must be at least 10 characters.');
-        return;
-      }
-      if (new Blob([newPassword]).size > 72) {
-        setChangePasswordError('Password cannot exceed 72 bytes in length.');
-        return;
-      }
-      if (COMMON_WEAK_PASSWORDS.has(newPassword.toLowerCase())) {
-        setChangePasswordError('Password is too common or weak. Please choose a more secure password.');
+      const validation = validatePassword(newPassword, {
+        username: pendingUser?.username,
+        email: pendingUser?.email || username,
+        pharmacyName: pendingUser?.pharmacyName
+      });
+      if (!validation.valid) {
+        setChangePasswordError(validation.error);
         return;
       }
       if (password && newPassword === password) {
@@ -282,19 +262,23 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                 {!passwordAlreadyChanged && (
                   <>
                     <label className="block">
-                      <span className="mb-2 block text-xs font-bold text-ink/75">New Password (min 10 characters, max 72 bytes)</span>
+                      <span className="mb-2 block text-xs font-bold text-ink/75">New Password</span>
                       <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
                         <KeyRound className="mr-3 h-4 w-4 text-emerald" />
                         <input
                           autoFocus
                           type="password"
                           value={newPassword}
-                          onChange={e => setNewPassword(e.target.value)}
+                          onChange={e => {
+                            if (changePasswordError) setChangePasswordError('');
+                            setNewPassword(e.target.value);
+                          }}
                           disabled={changePasswordLoading}
                           placeholder="Enter new strong password"
                           className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
                         />
                       </div>
+                      <p className="mt-1.5 text-[11px] font-medium text-ink/50">At least 12 characters, with letters and numbers.</p>
                     </label>
 
                     <label className="block">
@@ -304,7 +288,10 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                         <input
                           type="password"
                           value={confirmPassword}
-                          onChange={e => setConfirmPassword(e.target.value)}
+                          onChange={e => {
+                            if (changePasswordError) setChangePasswordError('');
+                            setConfirmPassword(e.target.value);
+                          }}
                           disabled={changePasswordLoading}
                           placeholder="Repeat new password"
                           className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"

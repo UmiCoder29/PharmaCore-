@@ -23,25 +23,12 @@ import {
   setSession,
   clearSession as clearSupabaseSession,
 } from './supabaseClient.js';
+import { validatePassword, COMMON_WEAK_PASSWORDS } from './passwordPolicy.js';
 
 // ─── Session state ────────────────────────────────────────────────────────────
 
-let _currentUser = null; // { id, username, name, role, pharmacyId, pharmacyName, branchId, subscription, ... }
+let _currentUser = null; // { id, username, email, name, role, pharmacyId, pharmacyName, branchId, subscription, ... }
 let _passwordAlreadyChangedInSession = false;
-
-const COMMON_WEAK_PASSWORDS = new Set([
-  'password123',
-  'password1234',
-  '1234567890',
-  'admin12345',
-  'adminpassword',
-  'pharmacore1',
-  'pharmacore123',
-  'welcome1234',
-  'letmein1234',
-  'changeme123',
-  'iloveyou123'
-]);
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -127,6 +114,7 @@ export async function loginUser(emailInput, password) {
     _currentUser = {
       id: appUser.id,
       username: appUser.username,
+      email: authData.user?.email || trimmed,
       name: appUser.display_name || appUser.username,
       role: appUser.role, // 'superadmin' | 'admin' | 'pharmacist'
       pharmacyId: appUser.pharmacy_id || null,
@@ -158,6 +146,7 @@ export async function loginUser(emailInput, password) {
       success: true,
       id: _currentUser.id,
       username: _currentUser.username,
+      email: _currentUser.email,
       name: _currentUser.name,
       role: _currentUser.role,
       pharmacyId: _currentUser.pharmacyId,
@@ -576,20 +565,13 @@ export async function changeOwnPassword(newPassword) {
     }
 
     if (!_passwordAlreadyChangedInSession) {
-      if (typeof newPassword !== 'string') {
-        return { success: false, error: 'Password must be a valid string.' };
-      }
-      if (!newPassword.trim()) {
-        return { success: false, error: 'Password cannot be blank or made only of spaces.' };
-      }
-      if (newPassword.length < 10) {
-        return { success: false, error: 'Password must be at least 10 characters long.' };
-      }
-      if (Buffer.byteLength(newPassword, 'utf8') > 72) {
-        return { success: false, error: 'Password cannot exceed 72 bytes in length.' };
-      }
-      if (COMMON_WEAK_PASSWORDS.has(newPassword.toLowerCase())) {
-        return { success: false, error: 'Password is too common or weak. Please choose a more secure password.' };
+      const validation = validatePassword(newPassword, {
+        username: _currentUser?.username,
+        email: _currentUser?.email,
+        pharmacyName: _currentUser?.pharmacyName
+      });
+      if (!validation.valid) {
+        return { success: false, error: validation.error };
       }
 
       const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });

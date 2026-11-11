@@ -196,13 +196,13 @@ describe('First-Login Password Flow & Security Verification', () => {
       }
     });
 
-    it('rejects passwords shorter than 10 characters', async () => {
+    it('rejects passwords shorter than 12 characters', async () => {
       const mock = createMockClient();
       _setSupabaseClientForTesting(mock);
 
-      const res = await changeOwnPassword('Short1234');
+      const res = await changeOwnPassword('Short123456');
       assert.equal(res.success, false);
-      assert.match(res.error, /at least 10 characters/i);
+      assert.match(res.error, /at least 12 characters/i);
       assert.equal(mock.getUpdateUserCalls(), 0);
     });
 
@@ -210,7 +210,7 @@ describe('First-Login Password Flow & Security Verification', () => {
       const mock = createMockClient();
       _setSupabaseClientForTesting(mock);
 
-      const exact72Bytes = 'A'.repeat(72);
+      const exact72Bytes = 'SecurePass2026!' + 'A'.repeat(57);
       assert.equal(Buffer.byteLength(exact72Bytes, 'utf8'), 72);
 
       const res = await changeOwnPassword(exact72Bytes);
@@ -223,16 +223,16 @@ describe('First-Login Password Flow & Security Verification', () => {
       _setSupabaseClientForTesting(mock);
 
       // 73 ASCII bytes
-      const pass73Bytes = 'A'.repeat(73);
+      const pass73Bytes = 'SecurePass2026!' + 'A'.repeat(58);
       assert.equal(Buffer.byteLength(pass73Bytes, 'utf8'), 73);
       const res1 = await changeOwnPassword(pass73Bytes);
       assert.equal(res1.success, false);
       assert.match(res1.error, /cannot exceed 72 bytes/i);
       assert.equal(mock.getUpdateUserCalls(), 0);
 
-      // Multi-byte UTF-8: '€' is 3 bytes in UTF-8. 25 * 3 = 75 bytes (only 25 characters)
-      const multiBytePass = '€'.repeat(25);
-      assert.equal(Buffer.byteLength(multiBytePass, 'utf8'), 75);
+      // Multi-byte UTF-8: '€' is 3 bytes in UTF-8. 11 ASCII bytes + 21 * 3 bytes = 74 bytes (32 characters)
+      const multiBytePass = 'Secure2026!' + '€'.repeat(21);
+      assert.equal(Buffer.byteLength(multiBytePass, 'utf8'), 74);
       const res2 = await changeOwnPassword(multiBytePass);
       assert.equal(res2.success, false);
       assert.match(res2.error, /cannot exceed 72 bytes/i);
@@ -253,7 +253,7 @@ describe('First-Login Password Flow & Security Verification', () => {
       const mock = createMockClient();
       _setSupabaseClientForTesting(mock);
 
-      const untrimmed = '  ValidPassword2026!  ';
+      const untrimmed = '  SecurePharma2026!  ';
       const res = await changeOwnPassword(untrimmed);
       assert.equal(res.success, true);
       assert.equal(mock.getUpdateUserCalls(), 1);
@@ -265,24 +265,14 @@ describe('First-Login Password Flow & Security Verification', () => {
       _setSupabaseClientForTesting(mock);
 
       const weakPasswords = [
-        'password123',
-        'Password123',
         'PASSWORD1234',
-        '1234567890',
-        'admin12345',
-        'adminpassword',
-        'pharmacore1',
-        'pharmacore123',
-        'welcome1234',
-        'letmein1234',
-        'changeme123',
-        'iloveyou123'
+        'pharmacore123'
       ];
 
       for (const weak of weakPasswords) {
         const res = await changeOwnPassword(weak);
         assert.equal(res.success, false);
-        assert.match(res.error, /too common or weak/i);
+        assert.match(res.error, /too easy to guess/i);
         assert.equal(mock.getUpdateUserCalls(), 0);
       }
     });
@@ -338,7 +328,7 @@ describe('First-Login Password Flow & Security Verification', () => {
       _setSupabaseClientForTesting(mock);
 
       // Attempt 1: Auth updateUser succeeds, RPC returns false
-      const res1 = await changeOwnPassword('StrongPassword2026!');
+      const res1 = await changeOwnPassword('SecurePharma2026!');
       assert.equal(res1.success, false);
       assert.equal(res1.passwordAlreadyChanged, true);
       assert.equal(mock.getUpdateUserCalls(), 1);
@@ -394,7 +384,7 @@ describe('First-Login Password Flow & Security Verification', () => {
       });
       _setSupabaseClientForTesting(mock);
 
-      const res = await changeOwnPassword('ValidPassword123');
+      const res = await changeOwnPassword('SecurePharma2026!');
       assert.equal(res.success, false);
       assert.equal(res.error, 'Supabase Auth network error');
       assert.equal(mock.getUpdateUserCalls(), 1);
@@ -420,7 +410,7 @@ describe('First-Login Password Flow & Security Verification', () => {
       });
       _setSupabaseClientForTesting(mock);
 
-      const res = await changeOwnPassword('StrongPassword2026!');
+      const res = await changeOwnPassword('SecurePharma2026!');
       assert.equal(res.success, false);
       assert.equal(res.passwordAlreadyChanged, true);
       assert.equal(res.error, 'Password was updated, but setup did not finish. Please click Finish Setup to retry.');
@@ -446,7 +436,7 @@ describe('First-Login Password Flow & Security Verification', () => {
       };
       _setSupabaseClientForTesting(mock);
 
-      const res = await changeOwnPassword('StrongPassword2026!');
+      const res = await changeOwnPassword('SecurePharma2026!');
       assert.equal(res.success, false);
       assert.equal(res.passwordAlreadyChanged, undefined);
       assert.equal(res.error, 'Failed to update password.');
@@ -478,7 +468,7 @@ describe('First-Login Password Flow & Security Verification', () => {
       _setSupabaseClientForTesting(mock);
 
       // Attempt 1: Password set, flag RPC returns false
-      const res1 = await changeOwnPassword('InitialStrongPassword123');
+      const res1 = await changeOwnPassword('InitialSecurePharma2026!');
       assert.equal(res1.success, false);
       assert.equal(res1.passwordAlreadyChanged, true);
       assert.equal(mock.getUpdateUserCalls(), 1);
@@ -563,8 +553,7 @@ describe('First-Login Password Flow & Security Verification', () => {
       let hasSetStateCall = false;
       let hasConditionalInputs = false;
       let hasFinishSetupText = false;
-      let hasWeakPasswordList = false;
-      let hasTrimValidation = false;
+      let hasPasswordPolicyCall = false;
 
       traverse(ast, {
         Identifier(path) {
@@ -574,13 +563,8 @@ describe('First-Login Password Flow & Security Verification', () => {
           if (path.node.name === 'setPasswordAlreadyChanged') {
             hasSetStateCall = true;
           }
-          if (path.node.name === 'COMMON_WEAK_PASSWORDS') {
-            hasWeakPasswordList = true;
-          }
-        },
-        MemberExpression(path) {
-          if (path.node.property?.name === 'trim') {
-            hasTrimValidation = true;
+          if (path.node.name === 'validatePassword') {
+            hasPasswordPolicyCall = true;
           }
         },
         StringLiteral(path) {
@@ -597,8 +581,7 @@ describe('First-Login Password Flow & Security Verification', () => {
 
       assert.equal(hasState, true, 'LoginScreen must declare passwordAlreadyChanged state');
       assert.equal(hasSetStateCall, true, 'LoginScreen must update passwordAlreadyChanged state when response carries passwordAlreadyChanged');
-      assert.equal(hasTrimValidation, true, 'LoginScreen must check trim() on new password to reject whitespace-only passwords');
-      assert.equal(hasWeakPasswordList, true, 'LoginScreen must declare COMMON_WEAK_PASSWORDS');
+      assert.equal(hasPasswordPolicyCall, true, 'LoginScreen must call validatePassword from shared policy');
       assert.equal(hasFinishSetupText, true, 'LoginScreen must render Finish Setup on retry');
       assert.equal(hasConditionalInputs, true, 'LoginScreen must conditionally render input fields using !passwordAlreadyChanged');
     });
