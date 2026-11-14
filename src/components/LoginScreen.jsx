@@ -1,7 +1,9 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import gsap from 'gsap';
 import { Store, Lock, User, Sparkles, ArrowRight, KeyRound, ShieldAlert } from 'lucide-react';
 import { validatePassword } from '../../electron/passwordPolicy.js';
+import PasswordToggle from './PasswordToggle.jsx';
+import { passwordVisibilityReducer, INITIAL_VISIBILITY } from '../utils/passwordVisibility.js';
 
 export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
   const [username, setUsername] = useState('');
@@ -18,9 +20,19 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
   const [changePasswordError, setChangePasswordError] = useState('');
   const [changePasswordLoading, setChangePasswordLoading] = useState(false);
 
+  // Password visibility state (isolated per field, resets on mode change)
+  const [visibility, dispatchVisibility] = useReducer(passwordVisibilityReducer, INITIAL_VISIBILITY);
+
   const shellRef = useRef(null);
   const formRef = useRef(null);
   const orbRefs = useRef([]);
+  const signInPasswordRef = useRef(null);
+  const newPasswordRef = useRef(null);
+  const confirmPasswordRef = useRef(null);
+
+  useEffect(() => {
+    dispatchVisibility({ type: 'reset' });
+  }, [step]);
 
   useLayoutEffect(() => {
     const context = gsap.context(() => {
@@ -48,6 +60,7 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
     try {
       const result = await window.pharmacoreAPI.login(trimmed, password);
       if (result.success) {
+        dispatchVisibility({ type: 'reset' });
         if (result.mustChangePassword) {
           setPendingUser(result);
           setStep('changePassword');
@@ -65,11 +78,13 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
           });
         }
       } else {
+        dispatchVisibility({ type: 'reset' });
         setLoginError('Invalid email or password.');
         setPassword('');
         setLoginLoading(false);
       }
     } catch {
+      dispatchVisibility({ type: 'reset' });
       setLoginError('Invalid email or password.');
       setLoginLoading(false);
     }
@@ -104,6 +119,7 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
     try {
       const res = await window.pharmacoreAPI.changePassword(newPassword);
       if (res.success) {
+        dispatchVisibility({ type: 'reset' });
         onLogin({
           username: pendingUser.username,
           name: pendingUser.name,
@@ -192,16 +208,26 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                 </label>
 
                 <label className="block">
-                  <span className="mb-2 block text-xs font-bold text-ink/75">Password</span>
+                  <span id="sign-in-password-label" className="mb-2 block text-xs font-bold text-ink/75">Password</span>
                   <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
                     <Lock className="mr-3 h-4 w-4 text-emerald" />
                     <input
-                      type="password"
+                      ref={signInPasswordRef}
+                      id="sign-in-password"
+                      aria-labelledby="sign-in-password-label"
+                      type={visibility.signIn ? 'text' : 'password'}
                       value={password}
                       onChange={e => setPassword(e.target.value)}
                       disabled={loginLoading}
+                      autoComplete="current-password"
                       placeholder="Enter your password"
-                      className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                      className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                    />
+                    <PasswordToggle
+                      isVisible={visibility.signIn}
+                      onToggle={() => dispatchVisibility({ type: 'toggle', field: 'signIn' })}
+                      disabled={loginLoading}
+                      inputRef={signInPasswordRef}
                     />
                   </div>
                 </label>
@@ -229,7 +255,10 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                   <p className="text-xs text-ink/60 mb-2">Want to sell with PharmaCore at your pharmacy?</p>
                   <button
                     type="button"
-                    onClick={onSwitchToOnboarding}
+                    onClick={() => {
+                      dispatchVisibility({ type: 'reset' });
+                      onSwitchToOnboarding();
+                    }}
                     className="w-full py-3 bg-clinical hover:bg-emerald/10 text-emerald font-bold text-xs rounded-2xl border border-emerald/20 transition-all flex items-center justify-center gap-2"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
@@ -262,39 +291,59 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                 {!passwordAlreadyChanged && (
                   <>
                     <label className="block">
-                      <span className="mb-2 block text-xs font-bold text-ink/75">New Password</span>
+                      <span id="new-password-label" className="mb-2 block text-xs font-bold text-ink/75">New Password</span>
                       <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
                         <KeyRound className="mr-3 h-4 w-4 text-emerald" />
                         <input
+                          ref={newPasswordRef}
+                          id="new-password"
+                          aria-labelledby="new-password-label"
                           autoFocus
-                          type="password"
+                          type={visibility.newPassword ? 'text' : 'password'}
                           value={newPassword}
                           onChange={e => {
                             if (changePasswordError) setChangePasswordError('');
                             setNewPassword(e.target.value);
                           }}
                           disabled={changePasswordLoading}
+                          autoComplete="new-password"
                           placeholder="Enter new strong password"
-                          className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                          className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                        />
+                        <PasswordToggle
+                          isVisible={visibility.newPassword}
+                          onToggle={() => dispatchVisibility({ type: 'toggle', field: 'newPassword' })}
+                          disabled={changePasswordLoading}
+                          inputRef={newPasswordRef}
                         />
                       </div>
                       <p className="mt-1.5 text-[11px] font-medium text-ink/50">At least 12 characters, with letters and numbers.</p>
                     </label>
 
                     <label className="block">
-                      <span className="mb-2 block text-xs font-bold text-ink/75">Confirm New Password</span>
+                      <span id="confirm-password-label" className="mb-2 block text-xs font-bold text-ink/75">Confirm New Password</span>
                       <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
                         <Lock className="mr-3 h-4 w-4 text-emerald" />
                         <input
-                          type="password"
+                          ref={confirmPasswordRef}
+                          id="confirm-password"
+                          aria-labelledby="confirm-password-label"
+                          type={visibility.confirmPassword ? 'text' : 'password'}
                           value={confirmPassword}
                           onChange={e => {
                             if (changePasswordError) setChangePasswordError('');
                             setConfirmPassword(e.target.value);
                           }}
                           disabled={changePasswordLoading}
+                          autoComplete="new-password"
                           placeholder="Repeat new password"
-                          className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                          className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                        />
+                        <PasswordToggle
+                          isVisible={visibility.confirmPassword}
+                          onToggle={() => dispatchVisibility({ type: 'toggle', field: 'confirmPassword' })}
+                          disabled={changePasswordLoading}
+                          inputRef={confirmPasswordRef}
                         />
                       </div>
                     </label>
