@@ -498,9 +498,26 @@ describe('PharmaCore Password Policy Comprehensive Suite', () => {
       }
     });
 
-    it('Break attempt 2 (renderer and main disagreeing): verified through parity test above', () => {
-      // Handled and proven in suite 3 (Main Process & Renderer Parity)
-      assert.ok(true);
+    it('Break attempt 2 (main process handler and shared module disagreeing): complex session personal-info attack evaluated identically in main process handler and shared module', async () => {
+      // Adversarial case: candidate password embeds normalized pharmacy name with mixed case,
+      // spaces, and symbols designed to probe differences between frontend and backend normalization.
+      const adversarialPassword = 'Prefix-Al-Shifa Pharmacy-2026!';
+      const context = {
+        username: 'dr_tariq',
+        email: 'tariq@shifa.test',
+        pharmacyName: 'Al-Shifa Pharmacy'
+      };
+
+      const policyRes = validatePassword(adversarialPassword, context);
+      const mainRes = await changeOwnPassword(adversarialPassword);
+
+      assert.equal(policyRes.valid, false);
+      assert.equal(mainRes.success, false);
+      assert.equal(
+        policyRes.error,
+        'Password must not contain your username, email name or pharmacy name.'
+      );
+      assert.equal(mainRes.error, policyRes.error);
     });
 
     it('Break attempt 3 (hostile non-string payload): changeOwnPassword safely rejects without unhandled crash or stack trace leak', async () => {
