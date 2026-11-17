@@ -126,6 +126,27 @@ body::before {
     border-color: var(--color-primary);
     box-shadow: 0 0 0 3px var(--color-glow);
   }
+
+  /* Opt-out for inputs inside pre-styled wrapper containers */
+  input.input-bare[type="text"],
+  input.input-bare[type="number"],
+  input.input-bare[type="password"],
+  input.input-bare[type="email"] {
+    border-width: 0;
+    border-color: transparent;
+    background-color: transparent;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  input.input-bare[type="text"]:focus,
+  input.input-bare[type="number"]:focus,
+  input.input-bare[type="password"]:focus,
+  input.input-bare[type="email"]:focus {
+    background-color: transparent;
+    border-color: transparent;
+    box-shadow: none;
+  }
 }
 
 /* Custom Scrollbar */

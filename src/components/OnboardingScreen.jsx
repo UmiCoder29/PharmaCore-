@@ -227,7 +227,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                     placeholder="e.g. Al-Shifa Pharmacy"
                     value={pharmacyName}
                     onChange={e => setPharmacyName(e.target.value)}
-                    className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30"
+                    className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30 input-bare"
                   />
                 </div>
               </div>
@@ -243,7 +243,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                       placeholder="Karachi"
                       value={city}
                       onChange={e => setCity(e.target.value)}
-                      className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30"
+                      className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30 input-bare"
                     />
                   </div>
                 </div>
@@ -257,7 +257,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                       placeholder="0300-1234567"
                       value={phone}
                       onChange={e => setPhone(e.target.value)}
-                      className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30"
+                      className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30 input-bare"
                     />
                   </div>
                 </div>
@@ -272,7 +272,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                     placeholder="contact@pharmacy.pk"
                     value={email}
                     onChange={e => setEmail(e.target.value)}
-                    className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30"
+                    className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30 input-bare"
                   />
                 </div>
               </div>
@@ -299,7 +299,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                     placeholder="Dr. Tariq Khan"
                     value={name}
                     onChange={e => setName(e.target.value)}
-                    className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30"
+                    className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30 input-bare"
                   />
                 </div>
               </div>
@@ -314,7 +314,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                     placeholder="tariqadmin"
                     value={username}
                     onChange={e => setUsername(e.target.value)}
-                    className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30"
+                    className="w-full bg-transparent text-sm font-medium outline-none placeholder:text-ink/30 input-bare"
                   />
                 </div>
                 <p className="text-[11px] text-ink/50 mt-1 font-mono">You will use this username to log in.</p>
@@ -331,7 +331,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                       placeholder="••••••••"
                       value={password}
                       onChange={e => setPassword(e.target.value)}
-                      className="w-full bg-transparent text-sm font-medium outline-none"
+                      className="w-full bg-transparent text-sm font-medium outline-none input-bare"
                     />
                   </div>
                 </div>
@@ -346,7 +346,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                       placeholder="••••••••"
                       value={confirmPassword}
                       onChange={e => setConfirmPassword(e.target.value)}
-                      className="w-full bg-transparent text-sm font-medium outline-none"
+                      className="w-full bg-transparent text-sm font-medium outline-none input-bare"
                     />
                   </div>
                 </div>
@@ -383,7 +383,7 @@ export default function OnboardingScreen({ onLogin, onSwitchToLogin }) {
                     value={branchName}
                     onChange={e => setBranchName(e.target.value)}
                     placeholder="Main Branch"
-                    className="w-full bg-transparent text-sm font-medium outline-none"
+                    className="w-full bg-transparent text-sm font-medium outline-none input-bare"
                   />
                 </div>
               </div>

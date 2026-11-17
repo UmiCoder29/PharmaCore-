@@ -202,7 +202,7 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                       onChange={e => setUsername(e.target.value)}
                       disabled={loginLoading}
                       placeholder="e.g. admin@yourpharmacy.com"
-                      className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                      className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50 input-bare"
                     />
                   </div>
                 </label>
@@ -221,7 +221,7 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                       disabled={loginLoading}
                       autoComplete="current-password"
                       placeholder="Enter your password"
-                      className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                      className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50 input-bare"
                     />
                     <PasswordToggle
                       isVisible={visibility.signIn}
@@ -308,7 +308,7 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                           disabled={changePasswordLoading}
                           autoComplete="new-password"
                           placeholder="Enter new strong password"
-                          className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                          className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50 input-bare"
                         />
                         <PasswordToggle
                           isVisible={visibility.newPassword}
@@ -337,7 +337,7 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                           disabled={changePasswordLoading}
                           autoComplete="new-password"
                           placeholder="Repeat new password"
-                          className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50"
+                          className="w-full flex-1 min-w-0 bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50 input-bare"
                         />
                         <PasswordToggle
                           isVisible={visibility.confirmPassword}

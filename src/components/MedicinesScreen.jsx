@@ -542,7 +542,7 @@ function BatchModal({ mode, medicine, initial, suppliers, onSave, onClose, isSub
                   min={0}
                   step={1}
                   disabled={isSubmitting}
-                  className="w-full bg-transparent px-3 py-2.5 text-sm outline-none"
+                  className="w-full bg-transparent px-3 py-2.5 text-sm outline-none input-bare"
                 />
                 {hasPackaging && (
                   <select
