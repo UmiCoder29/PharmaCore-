@@ -1,11 +1,11 @@
 import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import gsap from 'gsap';
-import { Store, Lock, User, Sparkles, ArrowRight, KeyRound, ShieldAlert } from 'lucide-react';
+import { Store, Lock, User, ArrowRight, KeyRound, ShieldAlert } from 'lucide-react';
 import { validatePassword } from '../../electron/passwordPolicy.js';
 import PasswordToggle from './PasswordToggle.jsx';
 import { passwordVisibilityReducer, INITIAL_VISIBILITY } from '../utils/passwordVisibility.js';
 
-export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
+export default function LoginScreen({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -248,24 +248,6 @@ export default function LoginScreen({ onLogin, onSwitchToOnboarding }) {
                   <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
                 </button>
               </form>
-
-              {/* New Pharmacy Signup Link */}
-              {onSwitchToOnboarding && (
-                <div className="mt-8 pt-6 border-t border-ink/10 text-center">
-                  <p className="text-xs text-ink/60 mb-2">Want to sell with PharmaCore at your pharmacy?</p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      dispatchVisibility({ type: 'reset' });
-                      onSwitchToOnboarding();
-                    }}
-                    className="w-full py-3 bg-clinical hover:bg-emerald/10 text-emerald font-bold text-xs rounded-2xl border border-emerald/20 transition-all flex items-center justify-center gap-2"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Register New Pharmacy & Start Free Trial</span>
-                  </button>
-                </div>
-              )}
             </>
           ) : (
             <>

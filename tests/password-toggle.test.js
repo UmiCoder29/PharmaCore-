@@ -343,35 +343,6 @@ describe('Password Toggle & Visibility Suite', () => {
       assert.equal(failedLoginCatchReset, true, 'LoginScreen must dispatch reset action in failed login catch branch');
     });
 
-    it('Structural check: dispatches reset action when switching to onboarding (structural check only)', () => {
-      const ast = parseLoginScreenAst();
-      let onboardingResetFound = false;
-
-      traverse(ast, {
-        CallExpression(path) {
-          if (path.node.callee.name === 'onSwitchToOnboarding') {
-            const fn = path.getFunctionParent();
-            if (fn) {
-              fn.traverse({
-                CallExpression(inner) {
-                  if (
-                    inner.node.callee.name === 'dispatchVisibility' &&
-                    inner.node.arguments[0]?.properties?.some(
-                      p => (p.key.name === 'type' || p.key.value === 'type') && p.value.value === 'reset'
-                    )
-                  ) {
-                    onboardingResetFound = true;
-                  }
-                }
-              });
-            }
-          }
-        }
-      });
-
-      assert.equal(onboardingResetFound, true, 'LoginScreen must dispatch reset action before calling onSwitchToOnboarding');
-    });
-
     it('Structural check: dispatches reset action immediately before onLogin is called (structural check only)', () => {
       const ast = parseLoginScreenAst();
       let onLoginResetCount = 0;

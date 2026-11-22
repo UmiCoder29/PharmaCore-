@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import LoginScreen       from './components/LoginScreen.jsx';
-import OnboardingScreen  from './components/OnboardingScreen.jsx';
 import Dashboard         from './components/Dashboard.jsx';
 import LoadingDashboard  from './components/LoadingDashboard.jsx';
 import ErrorBoundary     from './components/ErrorBoundary.jsx';
@@ -14,8 +13,8 @@ export default function App() {
 
   useEffect(() => {
     window.pharmacoreAPI.getIsFirstRun()
-      .then(isFirstRun => {
-        setAuthState(isFirstRun ? 'onboarding' : 'login');
+      .then(() => {
+        setAuthState('login');
       })
       .catch(err => {
         console.error('Failed to check first run state:', err);
@@ -41,17 +40,9 @@ export default function App() {
         </div>
       )}
 
-      {authState === 'onboarding' && (
-        <OnboardingScreen
-          onLogin={handleLogin}
-          onSwitchToLogin={() => setAuthState('login')}
-        />
-      )}
-
       {authState === 'login' && (
         <LoginScreen
           onLogin={handleLogin}
-          onSwitchToOnboarding={() => setAuthState('onboarding')}
         />
       )}
 

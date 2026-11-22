@@ -31,10 +31,6 @@ contextBridge.exposeInMainWorld('pharmacoreAPI', {
     ipcRenderer.invoke('auth:reset-user-password', { userId, newPassword }),
   changePassword: (newPassword) =>
     ipcRenderer.invoke('auth:change-password', { newPassword }),
-  register: (username, name, password, role, branchId, branchName) =>
-    ipcRenderer.invoke('auth:register', { username, name, password, role, branchId, branchName }),
-  registerPharmacy: (data) =>
-    ipcRenderer.invoke('auth:register-pharmacy', data),
 
   getUsers: () => ipcRenderer.invoke('api:get-users'),
 

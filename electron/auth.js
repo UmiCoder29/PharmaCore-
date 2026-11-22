@@ -14,7 +14,6 @@
  *   auth:update-username     → { success, error? }  (admin only)
  *   auth:update-user-branch  → { success, error? }  (admin only)
  *   auth:reset-user-password → { success, error? }  (admin only)
- *   auth:register-pharmacy   → { success, pharmacyId?, username?, error? }
  */
 
 import os from 'os';
@@ -664,10 +663,6 @@ export function registerIpcHandlers(ipcMain) {
     createUserAccount(username, name, password, role, branchId)
   );
 
-  ipcMain.handle('auth:register-pharmacy', async (_event, data) =>
-    registerPharmacy(data)
-  );
-
   ipcMain.handle('auth:update-username', async (_event, { userId, newUsername, newName }) =>
     updateUsername(userId, newUsername, newName)
   );
@@ -683,16 +678,4 @@ export function registerIpcHandlers(ipcMain) {
   ipcMain.handle('auth:change-password', async (_event, { newPassword }) =>
     changeOwnPassword(newPassword)
   );
-
-  ipcMain.handle('auth:register', async (_event, { username, name, password, role, branchId, branchName }) => {
-    // If branches are empty, redirect or handle as pharmacy registration
-    return registerPharmacy({
-      pharmacyName: branchName || 'My Pharmacy',
-      username,
-      name,
-      password,
-      branchName: branchName || 'Main Branch',
-      planTier: 'trial'
-    });
-  });
 }
