@@ -2,3 +2,6 @@
 
 [functions.provision-pharmacy]
 verify_jwt = true
+
+[functions.reset-user-password]
+verify_jwt = true

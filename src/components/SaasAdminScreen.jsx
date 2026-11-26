@@ -29,7 +29,8 @@ import {
   Phone,
   MapPin,
   UserPlus,
-  Copy
+  Copy,
+  KeyRound
 } from 'lucide-react';
 import DataTable from './DataTable.jsx';
 
@@ -80,6 +81,45 @@ export default function SaasAdminScreen({ user }) {
     maxUsers: 15,
     extensionDays: 30
   });
+
+  // Reset Owner Password State
+  const [resetOwnerTarget, setResetOwnerTarget] = useState(null);
+  const [resetOwnerTempPass, setResetOwnerTempPass] = useState(null);
+  const [resetOwnerError, setResetOwnerError] = useState('');
+  const [resetOwnerLoading, setResetOwnerLoading] = useState(false);
+  const [resetOwnerCopied, setResetOwnerCopied] = useState(false);
+
+  const handleOpenResetOwner = (pharm) => {
+    setResetOwnerTarget(pharm);
+    setResetOwnerTempPass(null);
+    setResetOwnerError('');
+    setResetOwnerCopied(false);
+  };
+
+  const handleCloseResetOwner = () => {
+    setResetOwnerTarget(null);
+    setResetOwnerTempPass(null);
+    setResetOwnerError('');
+    setResetOwnerCopied(false);
+  };
+
+  const handleConfirmResetOwner = async () => {
+    if (!resetOwnerTarget?.ownerId) return;
+    setResetOwnerLoading(true);
+    setResetOwnerError('');
+    try {
+      const res = await window.pharmacoreAPI.resetUserPassword(resetOwnerTarget.ownerId);
+      if (res && res.success) {
+        setResetOwnerTempPass(res.temporaryPassword);
+      } else {
+        setResetOwnerError(res?.error || 'Failed to reset owner password.');
+      }
+    } catch (err) {
+      setResetOwnerError(err.message || 'An unexpected error occurred.');
+    } finally {
+      setResetOwnerLoading(false);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -483,6 +523,11 @@ export default function SaasAdminScreen({ user }) {
                             <p className="text-xs text-ink/50 font-mono">
                               {pharm.city || 'Pakistan'} • {pharm.slug}
                             </p>
+                            {pharm.ownerUsername && (
+                              <p className="text-[11px] text-ink/60 mt-0.5">
+                                Owner: <span className="font-semibold text-ink/80">{pharm.ownerName || pharm.ownerUsername}</span> <span className="font-mono text-ink/50">(@{pharm.ownerUsername})</span>
+                              </p>
+                            )}
                           </div>
                         </div>
                       </td>
@@ -554,6 +599,16 @@ export default function SaasAdminScreen({ user }) {
                           >
                             <Edit3 className="w-4 h-4" />
                           </button>
+
+                          {pharm.ownerId && (
+                            <button
+                              onClick={() => handleOpenResetOwner(pharm)}
+                              className="p-1.5 bg-clinical hover:bg-amber-500/10 text-ink/80 hover:text-amber-700 rounded-lg transition-colors"
+                              title="Reset Owner Password"
+                            >
+                              <KeyRound className="w-4 h-4" />
+                            </button>
+                          )}
 
                           {pharm.subscriptionStatus === 'active' || pharm.subscriptionStatus === 'trial' ? (
                             <button
@@ -1043,6 +1098,124 @@ export default function SaasAdminScreen({ user }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Owner Password Modal */}
+      {resetOwnerTarget && (
+        <div className="fixed inset-0 z-50 bg-ink/40 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-surface rounded-2xl max-w-md w-full p-6 shadow-2xl border border-clinical-surface space-y-4">
+            <div className="flex items-center justify-between border-b border-clinical-surface pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-500/10 text-amber-700">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-ink">Reset Owner Password</h3>
+                  <p className="text-xs text-ink/60">{resetOwnerTarget.name}</p>
+                </div>
+              </div>
+              <button
+                onClick={handleCloseResetOwner}
+                className="text-ink/40 hover:text-ink transition-colors p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {resetOwnerError && (
+              <div className="p-3 bg-terracotta/10 border border-terracotta/20 rounded-xl flex items-start gap-2 text-terracotta text-xs">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{resetOwnerError}</span>
+              </div>
+            )}
+
+            {!resetOwnerTempPass ? (
+              <div className="space-y-4">
+                <p className="text-xs text-ink/70 leading-relaxed">
+                  Are you sure you want to reset the password for owner <strong className="text-ink">{resetOwnerTarget.ownerName || resetOwnerTarget.ownerUsername}</strong> (<span className="font-mono text-ink/80">{resetOwnerTarget.ownerUsername}</span>)?
+                </p>
+                <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 space-y-1">
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>Temporary Password</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    A secure 16-character temporary password will be generated. The owner will be required to change it on their next login.
+                  </p>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleCloseResetOwner}
+                    className="px-4 py-2 border border-clinical-surface rounded-xl text-xs font-bold text-ink/60 hover:bg-clinical"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmResetOwner}
+                    disabled={resetOwnerLoading}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    {resetOwnerLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                    <span>{resetOwnerLoading ? 'Resetting...' : 'Generate Temporary Password'}</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="p-3 bg-emerald/10 border border-emerald/20 rounded-xl text-xs text-emerald space-y-1">
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Password Reset Successful</span>
+                  </div>
+                  <p className="text-[11px] text-ink/70">
+                    This temporary password will only be displayed once. Copy and share it securely with the pharmacy owner.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-ink/60 uppercase tracking-wider block mb-1">
+                    Temporary Password
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 bg-clinical px-3.5 py-2.5 rounded-xl font-mono text-sm font-bold text-ink select-all border border-clinical-surface tracking-wider">
+                      {resetOwnerTempPass}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(resetOwnerTempPass);
+                        setResetOwnerCopied(true);
+                        setTimeout(() => setResetOwnerCopied(false), 2000);
+                      }}
+                      className="p-2.5 bg-emerald text-white rounded-xl hover:bg-emerald-700 transition-colors flex items-center justify-center shrink-0"
+                      title="Copy Password"
+                    >
+                      {resetOwnerCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-clinical rounded-xl border border-clinical-surface">
+                  <p className="text-xs text-ink/70">
+                    <strong>Note:</strong> The owner must change their password immediately upon signing in.
+                  </p>
+                </div>
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="button"
+                    onClick={handleCloseResetOwner}
+                    className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

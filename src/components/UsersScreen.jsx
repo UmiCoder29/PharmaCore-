@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Edit2, KeyRound, User, Shield, Building, Plus, RefreshCw, Sparkles, Users } from 'lucide-react';
+import { Edit2, KeyRound, User, Shield, Building, Plus, RefreshCw, Sparkles, Users, Copy, Check, AlertTriangle } from 'lucide-react';
 import DataTable from './DataTable.jsx';
 
 function formatDateTime(isoString) {
@@ -47,12 +47,10 @@ export default function UsersScreen({ user }) {
 
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetTarget, setResetTarget] = useState(null);
-  const [resetNewPassword, setResetNewPassword] = useState('');
-  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
-  const [resetShowNew, setResetShowNew] = useState(false);
+  const [resetTemporaryPassword, setResetTemporaryPassword] = useState('');
   const [resetError, setResetError] = useState('');
   const [resetSubmitting, setResetSubmitting] = useState(false);
-  const [resetSuccess, setResetSuccess] = useState('');
+  const [resetCopied, setResetCopied] = useState(false);
 
   const fetchUsersAndBranches = async () => {
     setLoading(true);
@@ -221,52 +219,34 @@ export default function UsersScreen({ user }) {
 
   const openResetModal = (targetUser) => {
     setResetTarget(targetUser);
-    setResetNewPassword('');
-    setResetConfirmPassword('');
-    setResetShowNew(false);
+    setResetTemporaryPassword('');
     setResetError('');
-    setResetSuccess('');
+    setResetCopied(false);
     setShowResetModal(true);
   };
 
   const closeResetModal = () => {
     setShowResetModal(false);
     setResetTarget(null);
-    setResetNewPassword('');
-    setResetConfirmPassword('');
-    setResetShowNew(false);
+    setResetTemporaryPassword('');
     setResetError('');
-    setResetSuccess('');
+    setResetCopied(false);
   };
 
-  const handleResetSubmit = async (e) => {
-    e.preventDefault();
+  const handleResetConfirm = async () => {
     setResetError('');
-    setResetSuccess('');
     if (!resetTarget) return;
-
-    if (resetNewPassword.length < 8) {
-      setResetError('Password must be at least 8 characters.');
-      return;
-    }
-    if (resetNewPassword !== resetConfirmPassword) {
-      setResetError('Passwords do not match.');
-      return;
-    }
 
     setResetSubmitting(true);
     try {
-      const result = await window.pharmacoreAPI.resetUserPassword(resetTarget.id, resetNewPassword);
-      if (result.success) {
-        setResetSuccess('Password reset successfully. Share the new password with the user.');
-        setTimeout(() => {
-          closeResetModal();
-        }, 1800);
+      const result = await window.pharmacoreAPI.resetUserPassword(resetTarget.id);
+      if (result && result.success && result.temporaryPassword) {
+        setResetTemporaryPassword(result.temporaryPassword);
       } else {
-        setResetError(result.error || 'Failed to reset password.');
+        setResetError(result?.error || 'Failed to reset password.');
       }
     } catch (err) {
-      setResetError('An unexpected error occurred.');
+      setResetError(err.message || 'An unexpected error occurred.');
     } finally {
       setResetSubmitting(false);
     }
@@ -463,13 +443,15 @@ export default function UsersScreen({ user }) {
                     >
                       <Edit2 className="w-3 h-3 text-slate-500" /> Edit
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => openResetModal(u)}
-                      className="flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 px-2.5 py-1 rounded-lg text-xs font-bold transition-all"
-                    >
-                      <KeyRound className="w-3 h-3 text-amber-600" /> Reset
-                    </button>
+                    {(user?.role === 'admin' && u.role === 'pharmacist' && u.id !== user.id) && (
+                      <button
+                        type="button"
+                        onClick={() => openResetModal(u)}
+                        className="flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 px-2.5 py-1 rounded-lg text-xs font-bold transition-all"
+                      >
+                        <KeyRound className="w-3 h-3 text-amber-600" /> Reset
+                      </button>
+                    )}
                   </div>
                 )
               }
@@ -554,39 +536,74 @@ export default function UsersScreen({ user }) {
               <button onClick={closeResetModal} className="text-slate-400 hover:text-slate-600 font-bold">×</button>
             </div>
 
-            <form onSubmit={handleResetSubmit} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-bold text-slate-700 uppercase mb-1">New Password (min 8 chars)</label>
-                <input
-                  type="password"
-                  value={resetNewPassword}
-                  onChange={e => setResetNewPassword(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold outline-none"
-                  placeholder="••••••••"
-                />
-              </div>
+            {!resetTemporaryPassword ? (
+              <div className="space-y-4 text-xs">
+                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="text-amber-900 leading-relaxed">
+                    <p className="font-bold mb-1">Administrative Password Reset</p>
+                    <p>
+                      Reset password for <strong>{resetTarget.name || resetTarget.username}</strong> ({resetTarget.username})?
+                      A new temporary password will be generated automatically and shown once.
+                    </p>
+                  </div>
+                </div>
 
-              <div>
-                <label className="block font-bold text-slate-700 uppercase mb-1">Confirm New Password</label>
-                <input
-                  type="password"
-                  value={resetConfirmPassword}
-                  onChange={e => setResetConfirmPassword(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold outline-none"
-                  placeholder="••••••••"
-                />
-              </div>
+                {resetError && <div className="p-2.5 bg-red-50 text-terracotta border border-red-200 rounded-xl font-semibold">{resetError}</div>}
 
-              {resetError && <div className="text-terracotta font-semibold">{resetError}</div>}
-              {resetSuccess && <div className="text-emerald font-semibold">{resetSuccess}</div>}
-
-              <div className="flex justify-end gap-2 pt-2 border-t">
-                <button type="button" onClick={closeResetModal} className="px-4 py-2 bg-slate-100 rounded-xl font-bold">Cancel</button>
-                <button type="submit" disabled={resetSubmitting} className="px-4 py-2 bg-ink text-white rounded-xl font-bold">
-                  {resetSubmitting ? 'Resetting...' : 'Reset Password'}
-                </button>
+                <div className="flex justify-end gap-2 pt-2 border-t">
+                  <button type="button" onClick={closeResetModal} disabled={resetSubmitting} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 rounded-xl font-bold">Cancel</button>
+                  <button
+                    type="button"
+                    onClick={handleResetConfirm}
+                    disabled={resetSubmitting}
+                    className="px-4 py-2 bg-ink hover:bg-slate-800 text-white rounded-xl font-bold transition-all flex items-center gap-2"
+                  >
+                    <KeyRound className="w-3.5 h-3.5" />
+                    {resetSubmitting ? 'Generating…' : 'Generate Temporary Password'}
+                  </button>
+                </div>
               </div>
-            </form>
+            ) : (
+              <div className="space-y-4 text-xs">
+                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl">
+                  <p className="text-emerald-900 font-bold mb-1">Temporary Password Generated</p>
+                  <p className="text-emerald-800 text-[11px] mb-3">
+                    Copy and share this temporary password with the user now. It will not be shown again.
+                  </p>
+
+                  <div className="flex items-center justify-between bg-white border border-emerald-300 rounded-xl p-3 font-mono text-sm font-bold text-ink select-all">
+                    <span>{resetTemporaryPassword}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(resetTemporaryPassword);
+                        setResetCopied(true);
+                        setTimeout(() => setResetCopied(false), 2000);
+                      }}
+                      className="flex items-center gap-1 text-xs font-sans px-2.5 py-1 bg-emerald text-white rounded-lg hover:bg-emerald/90 transition-all ml-2"
+                    >
+                      {resetCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      {resetCopied ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] leading-relaxed">
+                  <strong>Important:</strong> Share this with the user now. It will not be shown again. They must change it at next sign-in.
+                </div>
+
+                <div className="flex justify-end pt-2 border-t">
+                  <button
+                    type="button"
+                    onClick={closeResetModal}
+                    className="px-5 py-2 bg-ink hover:bg-slate-800 text-white rounded-xl font-bold transition-all"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>,
         document.body

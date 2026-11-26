@@ -27,8 +27,8 @@ contextBridge.exposeInMainWorld('pharmacoreAPI', {
     ipcRenderer.invoke('auth:update-username', { userId, newUsername, newName }),
   updateUserBranch: (userId, newBranchId) =>
     ipcRenderer.invoke('auth:update-user-branch', { userId, newBranchId }),
-  resetUserPassword: (userId, newPassword) =>
-    ipcRenderer.invoke('auth:reset-user-password', { userId, newPassword }),
+  resetUserPassword: (userId) =>
+    ipcRenderer.invoke('auth:reset-user-password', { userId }),
   changePassword: (newPassword) =>
     ipcRenderer.invoke('auth:change-password', { newPassword }),
 

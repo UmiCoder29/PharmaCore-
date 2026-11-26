@@ -94,6 +94,20 @@ export function registerAppIpcHandlers(ipcMain) {
 
       if (pharmErr) return { success: false, error: pharmErr.message };
 
+      // Fetch oldest admin (owner) per pharmacy in ONE single query (Adjustment 5)
+      const { data: admins } = await supabase
+        .from('app_users')
+        .select('id, username, display_name, pharmacy_id, created_at')
+        .eq('role', 'admin')
+        .order('created_at', { ascending: true });
+
+      const ownersByPharmacy = {};
+      for (const admin of admins || []) {
+        if (admin.pharmacy_id && !ownersByPharmacy[admin.pharmacy_id]) {
+          ownersByPharmacy[admin.pharmacy_id] = admin;
+        }
+      }
+
       // Enrich with branch, user, and sales counts using count queries (no row fetching)
       const enriched = await Promise.all(
         (pharmacies || []).map(async (pharm) => {
@@ -103,8 +117,13 @@ export function registerAppIpcHandlers(ipcMain) {
             supabase.from('sales').select('id', { count: 'exact', head: true }).eq('pharmacy_id', pharm.id)
           ]);
 
+          const owner = ownersByPharmacy[pharm.id];
+
           return {
             ...toCamelCase(pharm),
+            ownerId: owner?.id || null,
+            ownerUsername: owner?.username || null,
+            ownerName: owner?.display_name || null,
             branchCount: branchesRes.count || 0,
             userCount: usersRes.count || 0,
             salesCount: salesRes.count || 0,
@@ -1327,11 +1346,6 @@ export function registerAppIpcHandlers(ipcMain) {
       console.error('[api] Error getting login activity:', error.message);
       throw new Error(error.message || JSON.stringify(error));
     }
-  });
-
-  ipcMain.handle('api:reset-user-password', async (event, { userId, newPassword }) => {
-    requireAdmin();
-    return await resetUserPassword(userId, newPassword);
   });
 
   // ============================================================================

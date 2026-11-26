@@ -538,15 +538,64 @@ export async function updateUserBranch(userId, newBranchId) {
   }
 }
 
+const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 /**
- * Admin-only: Resets a user's password.
- * Modifying another user's credentials in auth.users requires admin API / server-side function.
+ * Admin-only: Resets a user's password via the server-side reset-user-password Edge Function.
+ * Returns { success: true, temporaryPassword } or { success: false, error }.
  */
-export async function resetUserPassword(userId, newPassword) {
-  return {
-    success: false,
-    error: 'Administrative password reset requires a server-side function, not available yet.'
-  };
+export async function resetUserPassword(userId) {
+  try {
+    if (!_currentUser) {
+      return { success: false, error: 'Unauthorized: Please log in.' };
+    }
+    if (_currentUser.role !== 'superadmin' && _currentUser.role !== 'admin') {
+      return { success: false, error: 'Forbidden: Admin access required to reset user passwords.' };
+    }
+    if (!userId || typeof userId !== 'string' || !UUID_REGEX.test(userId.trim())) {
+      return { success: false, error: 'Invalid user identifier.' };
+    }
+
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return { success: false, error: 'Database client not initialized.' };
+    }
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) {
+      return { success: false, error: 'Session expired. Please log in again.' };
+    }
+
+    const { data, error } = await supabase.functions.invoke('reset-user-password', {
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      body: { userId: userId.trim() }
+    });
+
+    if (error) {
+      let errMsg = error.message || 'Failed to reset password.';
+      if (error.context && typeof error.context.json === 'function') {
+        try {
+          const body = await error.context.json();
+          if (body?.error) errMsg = body.error;
+        } catch (_) { }
+      }
+      return { success: false, error: errMsg };
+    }
+
+    if (!data || !data.success || !data.temporaryPassword) {
+      return { success: false, error: data?.error || 'Failed to generate temporary password.' };
+    }
+
+    return {
+      success: true,
+      temporaryPassword: data.temporaryPassword
+    };
+  } catch (err) {
+    return { success: false, error: err.message || 'Unexpected error resetting password.' };
+  }
 }
 
 /**
@@ -671,8 +720,8 @@ export function registerIpcHandlers(ipcMain) {
     updateUserBranch(userId, newBranchId)
   );
 
-  ipcMain.handle('auth:reset-user-password', async (_event, { userId, newPassword }) =>
-    resetUserPassword(userId, newPassword)
+  ipcMain.handle('auth:reset-user-password', async (_event, { userId }) =>
+    resetUserPassword(userId)
   );
 
   ipcMain.handle('auth:change-password', async (_event, { newPassword }) =>
