@@ -21,8 +21,8 @@ contextBridge.exposeInMainWorld('pharmacoreAPI', {
   getIsFirstRun: () => ipcRenderer.invoke('api:get-is-first-run'),
   login: (username, password) => ipcRenderer.invoke('auth:login', { username, password }),
   logout: () => ipcRenderer.invoke('auth:logout'),
-  createUser: (username, name, password, role, branchId) =>
-    ipcRenderer.invoke('auth:create-user', { username, name, password, role, branchId }),
+  createUser: (username, displayName, role, branchId) =>
+    ipcRenderer.invoke('auth:create-user', { username, displayName, role, branchId }),
   updateUsername: (userId, newUsername, newName) =>
     ipcRenderer.invoke('auth:update-username', { userId, newUsername, newName }),
   updateUserBranch: (userId, newBranchId) =>

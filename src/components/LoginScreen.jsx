@@ -50,7 +50,7 @@ export default function LoginScreen({ onLogin }) {
       return;
     }
     const trimmed = username.trim().toLowerCase();
-    if (!trimmed.includes('@')) {
+    if (!trimmed.includes('@') && !/^[a-z0-9_]{3,50}$/.test(trimmed)) {
       setLoginError('Invalid email or password.');
       return;
     }
@@ -192,16 +192,17 @@ export default function LoginScreen({ onLogin }) {
 
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <label className="block">
-                  <span className="mb-2 block text-xs font-bold text-ink/75">Email Address</span>
+                  <span className="mb-2 block text-xs font-bold text-ink/75">Email or Username</span>
                   <div className="flex items-center rounded-2xl border border-ink/10 bg-clinical px-4 transition-all focus-within:border-emerald/50 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald/10">
                     <User className="mr-3 h-4 w-4 text-emerald" />
                     <input
                       autoFocus
-                      type="email"
+                      type="text"
+                      autoComplete="username"
                       value={username}
                       onChange={e => setUsername(e.target.value)}
                       disabled={loginLoading}
-                      placeholder="e.g. admin@yourpharmacy.com"
+                      placeholder="e.g. admin@yourpharmacy.com or pharmacist_ali"
                       className="w-full bg-transparent py-4 text-sm font-medium outline-none placeholder:text-ink/30 disabled:opacity-50 input-bare"
                     />
                   </div>

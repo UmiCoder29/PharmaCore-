@@ -26,6 +26,9 @@ import { validatePassword, COMMON_WEAK_PASSWORDS } from './passwordPolicy.js';
 
 // ─── Session state ────────────────────────────────────────────────────────────
 
+export const STAFF_EMAIL_DOMAIN = 'staff.pharmacore.invalid';
+export const STAFF_USERNAME_REGEX = /^[a-z0-9_]{3,50}$/;
+
 let _currentUser = null; // { id, username, email, name, role, pharmacyId, pharmacyName, branchId, subscription, ... }
 let _passwordAlreadyChangedInSession = false;
 
@@ -61,8 +64,12 @@ export async function loginUser(emailInput, password) {
     }
 
     const trimmed = emailInput.trim().toLowerCase();
+    let authEmail = trimmed;
     if (!trimmed.includes('@')) {
-      return { success: false, error: 'Invalid email or password.' };
+      if (!STAFF_USERNAME_REGEX.test(trimmed)) {
+        return { success: false, error: 'Invalid email or password.' };
+      }
+      authEmail = `${trimmed}@${STAFF_EMAIL_DOMAIN}`;
     }
 
     const supabase = getSupabaseClient();
@@ -71,7 +78,7 @@ export async function loginUser(emailInput, password) {
     }
 
     const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-      email: trimmed,
+      email: authEmail,
       password,
     });
 
@@ -113,7 +120,7 @@ export async function loginUser(emailInput, password) {
     _currentUser = {
       id: appUser.id,
       username: appUser.username,
-      email: authData.user?.email || trimmed,
+      email: authData.user?.email || authEmail,
       name: appUser.display_name || appUser.username,
       role: appUser.role, // 'superadmin' | 'admin' | 'pharmacist'
       pharmacyId: appUser.pharmacy_id || null,
@@ -187,32 +194,83 @@ export async function logoutUser() {
 }
 
 /**
- * Admin-only: Creates a new user account in Supabase Auth & app_users with subscription quota enforcement.
+ * Admin-only: Creates a new pharmacist account via the server-side create-staff-user Edge Function.
+ * Enforces role, username, and branch rules; quota is enforced transactionally in the database.
  */
-export async function createUserAccount(username, name, password, role, branchId) {
+export async function createUserAccount(username, displayName, role, branchId) {
   try {
     if (!_currentUser) {
-      return { success: false, error: 'Unauthorised. Only administrators can create accounts.' };
+      return { success: false, error: 'Unauthorised. Only pharmacy administrators can create staff accounts.' };
     }
     if (_currentUser.mustChangePassword) {
       return { success: false, error: 'Unauthorized: Password change required.' };
     }
-    if (!['admin', 'superadmin'].includes(_currentUser.role)) {
-      return { success: false, error: 'Unauthorised. Only administrators can create accounts.' };
+    if (_currentUser.role !== 'admin' || !_currentUser.pharmacyId) {
+      return { success: false, error: 'Unauthorised. Only pharmacy owners can create staff accounts.' };
     }
-    if (!username || username.trim().length < 3) {
-      return { success: false, error: 'Username must be at least 3 characters.' };
+
+    const cleanRole = typeof role === 'string' ? role.trim().toLowerCase() : '';
+    if (cleanRole !== 'pharmacist') {
+      return { success: false, error: 'Only pharmacist accounts can be created here.' };
     }
-    if (!password || password.length < 8) {
-      return { success: false, error: 'Password must be at least 8 characters.' };
+
+    const cleanUsername = typeof username === 'string' ? username.trim().toLowerCase() : '';
+    if (!STAFF_USERNAME_REGEX.test(cleanUsername)) {
+      return { success: false, error: 'Username must be 3 to 50 lowercase letters, numbers, or underscores.' };
     }
-    if (!['superadmin', 'admin', 'pharmacist'].includes(role)) {
-      return { success: false, error: 'Invalid role.' };
+
+    const cleanDisplayName = typeof displayName === 'string' ? displayName.trim() : '';
+    if (cleanDisplayName.length < 2 || cleanDisplayName.length > 100) {
+      return { success: false, error: 'Full name must be between 2 and 100 characters.' };
+    }
+
+    const cleanBranchId = typeof branchId === 'string' ? branchId.trim() : '';
+    if (!UUID_REGEX.test(cleanBranchId)) {
+      return { success: false, error: 'Please select a valid branch.' };
+    }
+
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return { success: false, error: 'Database service unavailable.' };
+    }
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) {
+      return { success: false, error: 'Session expired. Please log in again.' };
+    }
+
+    const { data, error } = await supabase.functions.invoke('create-staff-user', {
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      body: {
+        username: cleanUsername,
+        displayName: cleanDisplayName,
+        role: 'pharmacist',
+        branchId: cleanBranchId
+      }
+    });
+
+    if (error) {
+      let errMsg = error.message || 'Failed to create staff account.';
+      if (error.context && typeof error.context.json === 'function') {
+        try {
+          const body = await error.context.json();
+          if (body?.error) errMsg = body.error;
+        } catch (_) { }
+      }
+      return { success: false, error: errMsg };
+    }
+
+    if (!data || !data.success || !data.temporaryPassword) {
+      return { success: false, error: data?.error || 'Failed to create staff account.' };
     }
 
     return {
-      success: false,
-      error: 'User creation requires a server-side function, not available yet.'
+      success: true,
+      temporaryPassword: data.temporaryPassword,
+      user: data.user
     };
   } catch (err) {
     console.error('[Auth] createUserAccount error:', err.message);
@@ -450,6 +508,24 @@ export async function updateUsername(userId, newUsername, newName) {
     const supabase = getSupabaseClient();
     if (!supabase) {
       return { success: false, error: 'Database service unavailable.' };
+    }
+
+    // Pharmacist login emails are derived from their creation username, so usernames cannot change
+    const { data: targetUser, error: targetErr } = await supabase
+      .from('app_users')
+      .select('id, role, username')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (targetErr) {
+      return { success: false, error: targetErr.message };
+    }
+
+    if (targetUser && targetUser.role === 'pharmacist' && trimmed !== (targetUser.username || '').toLowerCase()) {
+      return {
+        success: false,
+        error: 'Pharmacist usernames cannot be changed because their login identifier is derived from their creation username.'
+      };
     }
 
     // Duplicate check
@@ -708,8 +784,8 @@ export function registerIpcHandlers(ipcMain) {
     await logoutUser();
   });
 
-  ipcMain.handle('auth:create-user', async (_event, { username, name, password, role, branchId }) =>
-    createUserAccount(username, name, password, role, branchId)
+  ipcMain.handle('auth:create-user', async (_event, { username, displayName, role, branchId }) =>
+    createUserAccount(username, displayName, role, branchId)
   );
 
   ipcMain.handle('auth:update-username', async (_event, { userId, newUsername, newName }) =>

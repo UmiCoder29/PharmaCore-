@@ -138,8 +138,14 @@ describe('SuperAdmin Access Control & Handlers', () => {
   });
 
   describe('Option A Login Security with Mocked Supabase Client (electron/auth.js)', () => {
-    it('returns exact same error "Invalid email or password." for empty email or password without calling client', async () => {
+    it('returns exact same error "Invalid email or password." for empty or malformed identifier/password without calling client', async () => {
+      let signInCalled = false;
       const mockClient = createMockSupabaseClient();
+      const origSignIn = mockClient.auth.signInWithPassword;
+      mockClient.auth.signInWithPassword = async (args) => {
+        signInCalled = true;
+        return origSignIn(args);
+      };
       _setSupabaseClientForTesting(mockClient);
 
       const resEmptyEmail = await loginUser('', 'secret123');
@@ -148,8 +154,18 @@ describe('SuperAdmin Access Control & Handlers', () => {
       const resEmptyPass = await loginUser('admin@test.com', '');
       assert.deepEqual(resEmptyPass, { success: false, error: 'Invalid email or password.' });
 
-      const resNoAt = await loginUser('invaliduser', 'secret123');
-      assert.deepEqual(resNoAt, { success: false, error: 'Invalid email or password.' });
+      const resBadUsername = await loginUser('ab', 'secret123');
+      assert.deepEqual(resBadUsername, { success: false, error: 'Invalid email or password.' });
+
+      const resSpaceUsername = await loginUser('bad user!', 'secret123');
+      assert.deepEqual(resSpaceUsername, { success: false, error: 'Invalid email or password.' });
+
+      assert.equal(signInCalled, false, 'Empty or invalid bare identifiers must fail without calling client');
+
+      // Valid bare username appends @staff.pharmacore.invalid locally and still yields uniform error when unauthenticated
+      const resValidBare = await loginUser('invaliduser', 'secret123');
+      assert.deepEqual(resValidBare, { success: false, error: 'Invalid email or password.' });
+      assert.equal(signInCalled, true);
     });
 
     it('returns exact same error "Invalid email or password." when client auth.signInWithPassword fails', async () => {

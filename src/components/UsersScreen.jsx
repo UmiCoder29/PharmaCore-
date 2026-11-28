@@ -29,12 +29,13 @@ export default function UsersScreen({ user }) {
 
   const [username, setUsername] = useState('');
   const [name, setName] = useState('');
-  const [password, setPassword] = useState('');
   const [role, setRole] = useState('pharmacist');
   const [selectedBranchId, setSelectedBranchId] = useState('');
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [success, setSuccess] = useState('');
+  const [createdCredentials, setCreatedCredentials] = useState(null);
+  const [createCopied, setCreateCopied] = useState(false);
 
   const [showEditModal, setShowEditModal] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
@@ -121,12 +122,7 @@ export default function UsersScreen({ user }) {
       return;
     }
 
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters.');
-      return;
-    }
-
-    if (!selectedBranchId && role !== 'owner' && role !== 'superadmin') {
+    if (!selectedBranchId) {
       if (user?.canViewAllBranches) {
          setError('Please select a branch to assign this user to.');
       } else {
@@ -137,21 +133,27 @@ export default function UsersScreen({ user }) {
 
     setIsSubmitting(true);
     try {
+      const normalizedUsername = cleanUsername.toLowerCase();
       const result = await window.pharmacoreAPI.createUser(
-        username.trim(), name.trim(), password, role, selectedBranchId || null
+        normalizedUsername, cleanName, 'pharmacist', selectedBranchId
       );
-      if (result.success) {
-        setSuccess(`User ${name || username} created successfully.`);
+      if (result && result.success && result.temporaryPassword) {
+        setCreatedCredentials({
+          username: result.user?.username || normalizedUsername,
+          displayName: result.user?.displayName || cleanName,
+          temporaryPassword: result.temporaryPassword
+        });
+        setCreateCopied(false);
+        setSuccess(`Pharmacist account "${normalizedUsername}" created.`);
         setUsername('');
         setName('');
-        setPassword('');
         setRole('pharmacist');
         if (user?.canViewAllBranches) {
           setSelectedBranchId('');
         }
         fetchUsersAndBranches();
       } else {
-        setError(result.error || 'Failed to create user.');
+        setError(result?.error || 'Failed to create user.');
       }
     } catch (err) {
       setError(err.message || 'An unexpected error occurred.');
@@ -185,9 +187,10 @@ export default function UsersScreen({ user }) {
     setEditSuccess('');
     if (!editTarget) return;
 
-    const trimmed = editNewUsername.trim();
+    const isPharmacistTarget = editTarget.role === 'pharmacist';
+    const trimmed = isPharmacistTarget ? editTarget.username : editNewUsername.trim();
     const trimmedName = editNewName.trim();
-    if (trimmed.length < 3) {
+    if (!isPharmacistTarget && trimmed.length < 3) {
       setEditError('Employee ID must be at least 3 characters.');
       return;
     }
@@ -315,20 +318,6 @@ export default function UsersScreen({ user }) {
             </div>
 
             <div>
-              <label className="block font-bold text-ink/80 uppercase tracking-wider mb-1.5">Initial Password (min 8 chars) *</label>
-              <input
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                disabled={isSubmitting}
-                required
-                minLength={8}
-                className="w-full bg-clinical border border-ink/20 focus:border-emerald focus:ring-1 focus:ring-emerald/20 rounded-xl px-3.5 py-2.5 text-ink outline-none transition-all"
-                placeholder="••••••••"
-              />
-            </div>
-
-            <div>
               <label className="block font-bold text-ink/80 uppercase tracking-wider mb-1.5">Role</label>
               <select
                 value={role}
@@ -337,8 +326,11 @@ export default function UsersScreen({ user }) {
                 className="w-full bg-clinical border border-ink/20 focus:border-emerald rounded-xl px-3.5 py-2.5 text-ink outline-none font-semibold cursor-pointer"
               >
                 <option value="pharmacist">Pharmacist / Cashier</option>
-                <option value="admin">Branch Administrator</option>
               </select>
+            </div>
+
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] leading-relaxed">
+              A 16-character temporary password will be generated automatically and shown once after saving.
             </div>
 
             <div>
@@ -482,8 +474,14 @@ export default function UsersScreen({ user }) {
                   type="text"
                   value={editNewUsername}
                   onChange={e => setEditNewUsername(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold outline-none"
+                  disabled={editTarget.role === 'pharmacist'}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                 />
+                {editTarget.role === 'pharmacist' && (
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Pharmacist login IDs cannot be changed after creation. Display name and branch remain editable.
+                  </p>
+                )}
               </div>
 
               <div>
@@ -604,6 +602,64 @@ export default function UsersScreen({ user }) {
                 </div>
               </div>
             )}
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Created Staff One-Time Credentials Modal */}
+      {createdCredentials && createPortal(
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-base font-black text-slate-900">Staff Account Created</h3>
+              <button
+                onClick={() => { setCreatedCredentials(null); setCreateCopied(false); }}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl space-y-2.5">
+                <p className="text-emerald-900 font-bold">
+                  Account ready for {createdCredentials.displayName}
+                </p>
+                <p className="text-emerald-800 text-[11px]">
+                  Sign-in Username: <span className="font-mono font-bold text-ink">{createdCredentials.username}</span>
+                </p>
+                <div className="flex items-center justify-between bg-white border border-emerald-300 rounded-xl p-3 font-mono text-sm font-bold text-ink select-all">
+                  <span>{createdCredentials.temporaryPassword}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(createdCredentials.temporaryPassword);
+                      setCreateCopied(true);
+                      setTimeout(() => setCreateCopied(false), 2000);
+                    }}
+                    className="flex items-center gap-1 text-xs font-sans px-2.5 py-1 bg-emerald text-white rounded-lg hover:bg-emerald/90 transition-all ml-2"
+                  >
+                    {createCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    {createCopied ? 'Copied!' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] leading-relaxed">
+                <strong>Important:</strong> Share this temporary password with the user now. It will not be shown again. They must change it at next sign-in.
+              </div>
+
+              <div className="flex justify-end pt-2 border-t">
+                <button
+                  type="button"
+                  onClick={() => { setCreatedCredentials(null); setCreateCopied(false); }}
+                  className="px-5 py-2 bg-ink hover:bg-slate-800 text-white rounded-xl font-bold transition-all"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
           </div>
         </div>,
         document.body

@@ -39,6 +39,7 @@ function createMockClient({
 
   const client = {
     auth: {
+      getSession: async () => ({ data: { session: { access_token: 'mock-access-token' } } }),
       signInWithPassword: async () => {
         if (signInError) return { data: null, error: signInError };
         return {
@@ -57,6 +58,16 @@ function createMockClient({
         if (updateUserError) return { data: null, error: updateUserError };
         return { data: { user: { id: user?.id || 'usr-default' } }, error: null };
       }
+    },
+    functions: {
+      invoke: async () => ({
+        data: {
+          success: true,
+          temporaryPassword: 'MockTempPassword123',
+          user: { id: 'usr-new', username: 'newuser', displayName: 'New User', role: 'pharmacist', branchId: '11111111-1111-4111-8111-111111111111' }
+        },
+        error: null
+      })
     },
     rpc: async (fnName, args) => {
       rpcCalls++;
@@ -498,7 +509,7 @@ describe('First-Login Password Flow & Security Verification', () => {
         mustChangePassword: true
       });
 
-      const resCreate = await createUserAccount('newuser', 'New User', 'Pass12345678', 'pharmacist', 'br-1');
+      const resCreate = await createUserAccount('newuser', 'New User', 'pharmacist', '11111111-1111-4111-8111-111111111111');
       assert.equal(resCreate.success, false);
       assert.equal(resCreate.error, 'Unauthorized: Password change required.');
 
@@ -525,10 +536,9 @@ describe('First-Login Password Flow & Security Verification', () => {
       const mock = createMockClient();
       _setSupabaseClientForTesting(mock);
 
-      // createUserAccount passes auth check and reaches the server-side function notice
-      const resCreate = await createUserAccount('newuser', 'New User', 'Pass12345678', 'pharmacist', 'br-1');
-      assert.equal(resCreate.success, false);
-      assert.match(resCreate.error, /server-side function/i);
+      // createUserAccount passes auth check and succeeds with mock Edge Function
+      const resCreate = await createUserAccount('newuser', 'New User', 'pharmacist', '11111111-1111-4111-8111-111111111111');
+      assert.equal(resCreate.success, true);
 
       // updateUsername passes auth check and succeeds with mock
       const resUpdateUser = await updateUsername('usr-2', 'newname', 'New Display');
